@@ -1,0 +1,5 @@
+﻿  IOCTLFuzz_Radamsa.cpp
+C:\Users\devl\source\repos\IOCTLDump\IOCTLFuzz_Radamsa\IOCTLFuzz_Radamsa.cpp(44,45): warning C4244: 'argument': conversion from 'unsigned __int64' to 'DWORD', possible loss of data
+C:\Users\devl\source\repos\IOCTLDump\IOCTLFuzz_Radamsa\IOCTLFuzz_Radamsa.cpp(89,7): warning C4101: 'outBuf': unreferenced local variable
+C:\Users\devl\source\repos\IOCTLDump\IOCTLFuzz_Radamsa\IOCTLFuzz_Radamsa.cpp(171,26): warning C4805: '==': unsafe mix of type 'BOOL' and type 'bool' in operation
+  IOCTLFuzz_Radamsa.vcxproj -> C:\Users\devl\source\repos\IOCTLDump\x64\Debug\IOCTLFuzz_Radamsa.exe

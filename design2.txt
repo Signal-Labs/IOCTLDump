@@ -1,0 +1,15 @@
+formats: C:\DriverHooks\<drvname>\<devname>\<hooktype>\<hookspecificlayout>...
+	 C:\DriverHooks\<drvname>\<devname>\<hooktype>\<dev|fast>IO<W|R>\<len.conf len.data>
+	 C:\DriverHooks\<drvname>\<devname>\<hooktype>\<dev|fast>IOD\<ioctl>\<len.conf len.data>
+
+
+
+conf format:
+DriverName:<drvname>
+Type:<hooktype>
+IOCTL:<ifapplicable>
+InputBufferLength:<ifapplicable>
+OutputBufferLength:<ifapplicable>
+
+c:\DriverHooks\mfehidk\mfehidk\fastIOR\23.conf
+c:\DriverHooks\mfehidk\mfehidk\fastIOR\23.data

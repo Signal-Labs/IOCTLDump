@@ -1,0 +1,22 @@
+c:\IoctlDump\<drvName>\<ctl_code>\<inBufLen.data> = input buffer data contents from memory
+c:\IoctlDump\<drvName>\<ctl_code>\<inBufLen.conf> = details like input & output buffer lengths, etc.
+
+
+
+user app
+-> take inBufLen.conf path to parse output buffer info, etc
+-> takes inBufLen.data path
+-> parse conf and data (use len from inBufLen.data file size, not from conf as .data file will change during testing and not be reflected in conf)
+-> fuzz
+
+fuzzer
+-> modifies inBufLen.data file
+
+
+
+conf
+DrvName:<drvName>
+Type:<fastIo|deviceIo>
+ctlcode:<ioctl>
+InputBufferLength:<inBufLen>
+OutputBufferLength:<outBufLen>

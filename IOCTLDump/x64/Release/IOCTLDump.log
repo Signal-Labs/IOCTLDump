@@ -1,0 +1,5 @@
+﻿  Building 'IOCTLDump' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Stamping x64\Release\IOCTLDump.inf
+  Stamping [Version] section with DriverVer=12/03/2019,9.9.52.73
+  Main.cpp
+C:\Users\devl\source\repos\IOCTLDump\IOCTLDump\Main.cpp(354,1): error C2143: syntax error: missing ';' before '}'

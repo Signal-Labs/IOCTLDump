@@ -1,0 +1,5 @@
+﻿  IOCTLDumpClient.cpp
+C:\Users\devl\source\repos\IOCTLDump\IOCTLDumpClient\IOCTLDumpClient.cpp(20,27): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+  IOCTLDumpClient.vcxproj -> C:\Users\devl\source\repos\IOCTLDump\x64\Debug\IOCTLDumpClient.exe
+c:\Users\devl\source\repos\Shared\Headers\ntdll.h(8): warning C28251: Inconsistent annotation for 'NTSTATUS': this instance has no annotations. See c:\program files (x86)\windows kits\10\include\10.0.18362.0\shared\bcrypt.h(39). 
+C:\Users\devl\source\repos\IOCTLDump\IOCTLDumpClient\IOCTLDumpClient.cpp(26): warning C6387: 'Temp_value_#2009' could be '0':  this does not adhere to the specification for the function 'GetProcAddress'. 
