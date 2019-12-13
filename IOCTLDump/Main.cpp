@@ -2312,7 +2312,5 @@ NTSTATUS DriverEntry(
 	drvObj->MajorFunction[IRP_MJ_CLOSE] = ioctlCreateClose;
 	drvObj->MajorFunction[IRP_MJ_CLEANUP] = ioctlCleanup;
 	drvObj->DriverUnload = UnloadDriver;
-	RtlFreeUnicodeString(&ntUnicodeString);
-	RtlFreeUnicodeString(&ntWin32NameString);
 	return STATUS_SUCCESS;
 }
