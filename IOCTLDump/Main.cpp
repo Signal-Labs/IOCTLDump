@@ -7,6 +7,14 @@
 #pragma warning( disable : 4267)
 #pragma warning( disable : 4533)
 
+#define METHOD_FROM_CTL_CODE(ctrlCode)         ((ULONG)(ctrlCode & 3))
+
+#define METHOD_BUFFERED                 0
+#define METHOD_IN_DIRECT                1
+#define METHOD_OUT_DIRECT               2
+#define METHOD_NEITHER                  3
+
+
 typedef bool(__stdcall* fastIoCallD)(
 	struct _FILE_OBJECT* FileObject,
 	BOOLEAN Wait,
@@ -117,6 +125,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	OUT PIO_STATUS_BLOCK IoStatus,
 	IN struct _DEVICE_OBJECT* DeviceObject)
 {
+
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
@@ -324,8 +333,8 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length+1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length+1);
+	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length+2);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length+2);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 	IO_STATUS_BLOCK statBlock;
@@ -1225,7 +1234,8 @@ End:
 
 NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 {
-	
+	PVOID inBuf;
+	PVOID outBuf;
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
@@ -1241,6 +1251,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	{
 		ExFreePool(pObjName);
 	}
+
 	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
 	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
 	// TODO, check if we need to skip bytes
@@ -1286,6 +1297,19 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		goto End;
+	}
+	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
+	{
+	case METHOD_BUFFERED:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->AssociatedIrp.SystemBuffer; break;
+	case METHOD_IN_DIRECT:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+	case METHOD_OUT_DIRECT:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+	case METHOD_NEITHER:
+		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
+	default:
+		ExFreePool(pObjName); ExFreePool(pFullPath); goto End;
 	}
 	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length + 2);
 	RtlZeroMemory(pIoctlString, pIoctlStringUni.Length + 2);
@@ -1360,7 +1384,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pDataPath);
 		// Write data to pDataFile handle
 		IO_STATUS_BLOCK statBlock;
-		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Irp->AssociatedIrp.SystemBuffer, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
+		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, inBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
 
 		ZwClose(hDataFile);
 		if (!NT_SUCCESS(status))
@@ -1409,6 +1433,25 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	wcsncat(confFileString, newLine, 4);
 	LPWSTR typeHeader = L"Type:devIOD\n\0\0";
 	wcsncat(confFileString, typeHeader, 15);
+	LPWSTR type2Header = L"BuffType:\0\0";
+	LPWSTR buffHeader = L"METHOD_BUFFERED\n\0\0";
+	LPWSTR inDir = L"METHOD_IN_DIRECT\n\0\0";
+	LPWSTR outDir = L"METHOD_OUT_DIRECT\n\0\0";
+	LPWSTR neiDir = L"METHOD_NEITHER\n\0\0";
+	wcsncat(confFileString, type2Header, 12);
+	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
+	{
+	case METHOD_BUFFERED:
+		wcsncat(confFileString, buffHeader, 19); break;
+	case METHOD_IN_DIRECT:
+		wcsncat(confFileString, inDir, 20); break;
+	case METHOD_OUT_DIRECT:
+		wcsncat(confFileString, outDir, 21); break;
+	case METHOD_NEITHER:
+		wcsncat(confFileString, neiDir, 18); break;
+	default:
+		break;
+	}
 	LPWSTR ioctlHeader = L"IOCTL:\0\0";
 	wcsncat(confFileString, ioctlHeader, 9);
 	wcsncat(confFileString, pIoctlString, pIoctlStringUni.Length + 1);
@@ -1469,7 +1512,8 @@ End:
 
 NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 {
-	
+	PVOID inBuf;
+	PVOID outBuf;
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
@@ -1530,6 +1574,19 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		goto End;
+	}
+	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
+	{
+	case METHOD_BUFFERED:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->AssociatedIrp.SystemBuffer; break;
+	case METHOD_IN_DIRECT:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+	case METHOD_OUT_DIRECT:
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+	case METHOD_NEITHER:
+		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
+	default:
+		ExFreePool(pObjName); ExFreePool(pFullPath); goto End;
 	}
 	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length + 2);
 	RtlZeroMemory(pIoctlString, pIoctlStringUni.Length + 2);
@@ -1604,7 +1661,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pDataPath);
 		// Write data to pDataFile handle
 		IO_STATUS_BLOCK statBlock;
-		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Irp->AssociatedIrp.SystemBuffer, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
+		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, inBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
 
 		ZwClose(hDataFile);
 		if (!NT_SUCCESS(status))
@@ -1653,6 +1710,25 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	wcsncat(confFileString, newLine, 4);
 	LPWSTR typeHeader = L"Type:devIOD\n\0\0";
 	wcsncat(confFileString, typeHeader, 15);
+	LPWSTR type2Header = L"BuffType:\0\0";
+	LPWSTR buffHeader = L"METHOD_BUFFERED\n\0\0";
+	LPWSTR inDir = L"METHOD_IN_DIRECT\n\0\0";
+	LPWSTR outDir = L"METHOD_OUT_DIRECT\n\0\0";
+	LPWSTR neiDir = L"METHOD_NEITHER\n\0\0";
+	wcsncat(confFileString, type2Header, 12);
+	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
+	{
+	case METHOD_BUFFERED:
+		wcsncat(confFileString, buffHeader, 19); break;
+	case METHOD_IN_DIRECT:
+		wcsncat(confFileString, inDir, 20); break;
+	case METHOD_OUT_DIRECT:
+		wcsncat(confFileString, outDir, 21); break;
+	case METHOD_NEITHER:
+		wcsncat(confFileString, neiDir, 18); break;
+	default:
+		break;
+	}
 	LPWSTR ioctlHeader = L"IOCTL:\0\0";
 	wcsncat(confFileString, ioctlHeader, 9);
 	wcsncat(confFileString, pIoctlString, pIoctlStringUni.Length + 1);

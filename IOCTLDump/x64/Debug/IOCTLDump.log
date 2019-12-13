@@ -1,6 +1,6 @@
 ﻿  Building 'IOCTLDump' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
   Stamping x64\Debug\IOCTLDump.inf
-  Stamping [Version] section with DriverVer=12/10/2019,15.20.51.890
+  Stamping [Version] section with DriverVer=12/13/2019,21.10.6.176
   Main.cpp
   IOCTLDump.vcxproj -> C:\Users\devl\source\repos\IOCTLDump\x64\Debug\IOCTLDump.sys
   Done Adding Additional Store
