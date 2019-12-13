@@ -183,7 +183,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	{
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length +2);
@@ -201,7 +200,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	wcsncat(pFullPath, pIoctlString,pIoctlStringUni.Length);
@@ -214,7 +212,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
@@ -228,8 +225,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -258,8 +253,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -276,8 +269,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 	}
@@ -301,8 +292,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -340,9 +329,6 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ZwClose(hConfFile);
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
@@ -359,16 +345,10 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pIoctlStringUni);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
-	RtlFreeUnicodeString(&pOutputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -479,7 +459,6 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -511,7 +490,6 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 			ExFreePool(pDataPath);
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -537,7 +515,6 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pConfPath);
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -574,12 +551,10 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -700,7 +675,6 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -732,7 +706,6 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 			ExFreePool(pDataPath);
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -758,7 +731,6 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pConfPath);
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -793,8 +765,6 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		ZwClose(hConfFile);
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
@@ -811,14 +781,10 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
-	RtlFreeUnicodeString(&pOutputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -931,7 +897,6 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -963,7 +928,6 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 			ExFreePool(pDataPath);
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -989,7 +953,6 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pConfPath);
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -1028,12 +991,10 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -1138,7 +1099,6 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -1170,7 +1130,6 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 			ExFreePool(pDataPath);
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -1196,7 +1155,6 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pConfPath);
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -1231,8 +1189,6 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		ZwClose(hConfFile);
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
@@ -1249,14 +1205,10 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
-	RtlFreeUnicodeString(&pOutputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -1344,7 +1296,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	{
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
@@ -1375,7 +1326,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	wcsncat(pFullPath, pIoctlString, pIoctlStringUni.Length);
@@ -1388,7 +1338,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
@@ -1402,8 +1351,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -1432,8 +1379,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -1450,8 +1395,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 	}
@@ -1475,8 +1418,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -1533,9 +1474,6 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ZwClose(hConfFile);
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
@@ -1552,16 +1490,10 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pIoctlStringUni);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
-	RtlFreeUnicodeString(&pOutputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -1641,7 +1573,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	{
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
@@ -1672,7 +1603,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	wcsncat(pFullPath, pIoctlString, pIoctlStringUni.Length);
@@ -1685,7 +1615,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pIoctlString);
 		ExFreePool(pDrvName);
-		RtlFreeUnicodeString(&pIoctlStringUni);
 		goto End;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
@@ -1699,8 +1628,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
@@ -1729,8 +1656,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 		ExFreePool(pDataPath);
@@ -1747,8 +1672,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 			ExFreePool(pInputBufLenString);
 			ExFreePool(pDrvName);
 			ExFreePool(pIoctlString);
-			RtlFreeUnicodeString(&pIoctlStringUni);
-			RtlFreeUnicodeString(&pInputBufLenStringUni);
 			goto End;
 		}
 	}
@@ -1772,8 +1695,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pInputBufLenString);
 		ExFreePool(pDrvName);
 		ExFreePool(pIoctlString);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pConfPath);
@@ -1830,9 +1751,6 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ZwClose(hConfFile);
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
@@ -1849,16 +1767,10 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		// Error writing file
 		ExFreePool(pObjName);
 		ExFreePool(pFullPath);
-		RtlFreeUnicodeString(&pIoctlStringUni);
-		RtlFreeUnicodeString(&pInputBufLenStringUni);
-		RtlFreeUnicodeString(&pOutputBufLenStringUni);
 		goto End;
 	}
 	ExFreePool(pObjName);
 	ExFreePool(pFullPath);
-	RtlFreeUnicodeString(&pIoctlStringUni);
-	RtlFreeUnicodeString(&pInputBufLenStringUni);
-	RtlFreeUnicodeString(&pOutputBufLenStringUni);
 	goto End;
 End:
 	// Call original overwritten address
@@ -2246,7 +2158,6 @@ UnloadDriver(
 	DECLARE_UNICODE_STRING_SIZE(DosDeviceName, 40);
 	RtlInitUnicodeString(&DosDeviceName, DOS_DEVICE_NAME);
 	IoDeleteSymbolicLink(&DosDeviceName);
-	RtlFreeUnicodeString(&DosDeviceName);
 	IoDeleteDevice(DriverObject->DeviceObject);
 
 	if (fastIoHooksDArray != NULL)
@@ -2401,6 +2312,7 @@ NTSTATUS DriverEntry(
 	drvObj->MajorFunction[IRP_MJ_CLOSE] = ioctlCreateClose;
 	drvObj->MajorFunction[IRP_MJ_CLEANUP] = ioctlCleanup;
 	drvObj->DriverUnload = UnloadDriver;
-
+	RtlFreeUnicodeString(&ntUnicodeString);
+	RtlFreeUnicodeString(&ntWin32NameString);
 	return STATUS_SUCCESS;
 }
