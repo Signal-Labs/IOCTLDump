@@ -1,5 +1,22 @@
 ﻿  Building 'IOCTLDump' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
   Stamping x64\Release\IOCTLDump.inf
-  Stamping [Version] section with DriverVer=12/03/2019,9.9.52.73
+  Stamping [Version] section with DriverVer=03/17/2020,20.57.8.34
   Main.cpp
-C:\Users\devl\source\repos\IOCTLDump\IOCTLDump\Main.cpp(354,1): error C2143: syntax error: missing ';' before '}'
+  IOCTLDump.vcxproj -> C:\Users\devl\source\repos\IOCTLDump\x64\Release\IOCTLDump.sys
+  Done Adding Additional Store
+  Successfully signed: C:\Users\devl\source\repos\IOCTLDump\x64\Release\IOCTLDump.sys
+  
+  .........................
+  Signability test complete.
+  
+  Errors:
+  None
+  
+  Warnings:
+  None
+  
+  Catalog generation complete.
+  C:\Users\devl\source\repos\IOCTLDump\x64\Release\IOCTLDump\ioctldump.cat
+  Done Adding Additional Store
+  Successfully signed: C:\Users\devl\source\repos\IOCTLDump\x64\Release\IOCTLDump\ioctldump.cat
+  

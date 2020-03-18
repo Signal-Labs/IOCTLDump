@@ -7,7 +7,7 @@ Signature="$WINDOWS NT$"
 Class=System
 ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider=%ManufacturerName%
-DriverVer = 12/03/2019,9.9.52.73
+DriverVer = 03/17/2020,20.57.8.34
 CatalogFile=IOCTLDump.cat
 
 [DestinationDirs]

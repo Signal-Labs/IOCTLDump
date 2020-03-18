@@ -129,10 +129,11 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer+8, drvName.Length+1-8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen+4);
@@ -162,7 +163,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName,drvName.Length+1-8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	ExFreePool(pDevName);
 	status = CreateFolder(pFullPath);
@@ -315,7 +316,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	wcsncat(confFileString, newLine,4);
 	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
 	wcsncat(confFileString, inputLenHeader,21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length+1);
+	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pInputBufLenString);
 	wcsncat(confFileString, newLine,4);
@@ -334,7 +335,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
 	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length+2);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length+2);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 	IO_STATUS_BLOCK statBlock;
@@ -386,10 +387,11 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -420,7 +422,7 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	ExFreePool(pDevName);
 	status = CreateFolder(pFullPath);
@@ -536,7 +538,7 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	wcsncat(confFileString, newLine, 4);
 	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
 	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pInputBufLenString);
 	wcsncat(confFileString, newLine, 4);
@@ -603,10 +605,11 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -637,7 +640,7 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	ExFreePool(pDevName);
 	status = CreateFolder(pFullPath);
@@ -770,7 +773,7 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
 	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 	
@@ -825,10 +828,11 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -859,7 +863,7 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -975,7 +979,7 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
 	wcsncat(confFileString, inputLenHeader, 21);
 	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pInputBufLenString);
 	wcsncat(confFileString, newLine, 4);
@@ -1028,10 +1032,11 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	NTSTATUS status;
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -1062,7 +1067,7 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1194,7 +1199,7 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
 	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 
@@ -1240,9 +1245,10 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
 	UNICODE_STRING drvName = pDeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(pDeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -1274,7 +1280,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1460,7 +1466,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	wcsncat(confFileString, newLine, 4);
 	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
 	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pInputBufLenString);
 	wcsncat(confFileString, newLine, 4);
@@ -1479,7 +1485,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
 	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 	IO_STATUS_BLOCK statBlock;
@@ -1518,9 +1524,10 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	LPWSTR pathSeperator = L"\\\0\0";
 	LPCWSTR nullByteW = L"\0\0";
 	UNICODE_STRING drvName = pDeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
 	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
 	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	memcpy(pDrvName, drvName.Buffer + 8, drvName.Length + 1 - 8);
+	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
 	ULONG nameLen = 0;
 	status = ObQueryNameString(pDeviceObject, NULL, NULL, &nameLen);
 	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
@@ -1551,7 +1558,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 		ExFreePool(pFullPath);
 		goto End;
 	}
-	wcsncat(pFullPath, pDrvName, drvName.Length + 1 - 8);
+	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
 	wcsncat(pFullPath, nullByteW, 1);
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1737,7 +1744,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	wcsncat(confFileString, newLine, 4);
 	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
 	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pInputBufLenString);
 	wcsncat(confFileString, newLine, 4);
@@ -1756,7 +1763,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
 	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
 	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length + 1);
+	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
 	wcsncat(confFileString, nullByteW, 1);
 	ExFreePool(pOutputBufLenString);
 	IO_STATUS_BLOCK statBlock;

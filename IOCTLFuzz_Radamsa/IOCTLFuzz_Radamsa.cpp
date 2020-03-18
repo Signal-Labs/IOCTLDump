@@ -24,7 +24,14 @@ void fuzz(char* folder, const char* filename, char* fullPath)
 	drvName = token;
 	token = strtok(NULL, "\\");
 	sIoctl = token;
+	token = strtok(NULL, "\\");
+	sIoctl = token;
+	token = strtok(NULL, "\\");
+	sIoctl = token;
+	token = strtok(NULL, "\\");
+	sIoctl = token;
 	ioctl = strtoul(sIoctl, NULL, 16);
+	printf("sioctl:%s", sIoctl);
 	
 	DWORD fLen = 0;
 	int count = 0;

@@ -1,6 +1,6 @@
 #include <iostream>
 #include <Windows.h>
-#include "..\..\..\..\Shared\Headers\ntdll.h"
+#include "..\..\Shared\Headers\ntdll.h"
 #include "..\IOCTLDump\IOCTLDump.h"
 
 
