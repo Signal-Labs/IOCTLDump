@@ -49,10 +49,11 @@ void fuzz(char* folder, const char* filename, char* fullPath)
 	DWORD dwNoByteRead = 0;
 	//reading the content
 	BOOL readwriFile = ReadFile(hFile, strVal, fSize, &dwNoByteRead, NULL);
+	fLen = dwNoByteRead;
 	CloseHandle(hFile);
 	char* buf = (char*)calloc(1,dwNoByteRead);
 	memcpy(buf, strVal, dwNoByteRead);
-	printf("Fuzz: p=%s, ioctl=%x size=%d\n", fullPath, ioctl, dwNoByteRead);
+	printf("!Fuzz: p=%s, ioctl=%x size=%d\n", fullPath, ioctl, fLen);
 	BOOL bResult = DeviceIoControl(hDev,
 		ioctl,
 		buf,
