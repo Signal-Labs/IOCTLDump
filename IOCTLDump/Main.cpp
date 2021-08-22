@@ -3,9 +3,7 @@
 #include <stdlib.h>
 #include <ntddk.h>
 #include "IOCTLDump.h"
-
-#pragma warning( disable : 4267)
-#pragma warning( disable : 4533)
+#include "IOCTLDump_Kern.h"
 
 #define METHOD_FROM_CTL_CODE(ctrlCode)         ((ULONG)(ctrlCode & 3))
 
@@ -15,74 +13,58 @@
 #define METHOD_NEITHER                  3
 
 
-typedef bool(__stdcall* fastIoCallD)(
-	struct _FILE_OBJECT* FileObject,
-	BOOLEAN Wait,
-	PVOID InputBuffer,
-	ULONG InputBufferLength,
-	PVOID OutputBuffer,
-	ULONG OutputBufferLength,
-	ULONG IoControlCode,
-	PIO_STATUS_BLOCK IoStatus,
-	struct _DEVICE_OBJECT* DeviceObject
-	);
+IoHookList* fastIoHooksDArray = NULL;
 
-typedef bool(__stdcall* fastIoCallRW) (
-	struct _FILE_OBJECT* FileObject,
-	PLARGE_INTEGER FileOffset,
-	ULONG Length,
-	BOOLEAN Wait,
-	ULONG LockKey,
-	PVOID Buffer,
-	PIO_STATUS_BLOCK IoStatus,
-	struct _DEVICE_OBJECT* DeviceObject
-	);
+IoHookList* fastIoHooksRArray = NULL;
 
-typedef bool (__stdcall* devIoCallRWD)(
-	PDEVICE_OBJECT pDeviceObject, 
-	PIRP Irp
-);
+IoHookList* fastIoHooksWArray = NULL;
+
+IoHookList* deviceIoHooksDArray = NULL;
+
+IoHookList* deviceIoHooksWArray = NULL;
+
+IoHookList* deviceIoHooksRArray = NULL;
+
+IoHookList* fileIoHooksDArray = NULL;
 
 
-
-
-struct IoHooks
+KIRQL LowerAndCheckIRQL()
 {
-	UNICODE_STRING driverName;
-	PVOID originalFunction;
-	PVOID hookedAddress;
-};
+	KIRQL current = KeGetCurrentIrql();
+	if (current > PASSIVE_LEVEL) {
+		KeLowerIrql(PASSIVE_LEVEL);
+	}
+	return current;
+}
 
-IoHooks* fastIoHooksDArray = NULL;
-ULONGLONG fastIoHooksDArrayLen = 0;
-ULONGLONG fastIoHooksDArrayEntries = 0;
-
-IoHooks* fastIoHooksRArray = NULL;
-ULONGLONG fastIoHooksRArrayLen = 0;
-ULONGLONG fastIoHooksRArrayEntries = 0;
-
-IoHooks* fastIoHooksWArray = NULL;
-ULONGLONG fastIoHooksWArrayLen = 0;
-ULONGLONG fastIoHooksWArrayEntries = 0;
-
-IoHooks* deviceIoHooksDArray = NULL;
-ULONGLONG deviceIoHooksDArrayLen = 0;
-ULONGLONG deviceIoHooksDArrayEntries = 0;
-
-IoHooks* deviceIoHooksWArray = NULL;
-ULONGLONG deviceIoHooksWArrayLen = 0;
-ULONGLONG deviceIoHooksWArrayEntries = 0;
-
-IoHooks* deviceIoHooksRArray = NULL;
-ULONGLONG deviceIoHooksRArrayLen = 0;
-ULONGLONG deviceIoHooksRArrayEntries = 0;
-
-IoHooks* fileIoHooksDArray = NULL;
-ULONGLONG fileIoHooksDArrayLen = 0;
-ULONGLONG fileIoHooksDArrayEntries = 0;
+void RaiseAndCheckIRQL(KIRQL old)
+{
+	KIRQL current = KeGetCurrentIrql();
+	if (current != old)
+	{
+		KfRaiseIrql(old);
+	}
+}
 
 
-// TODO: Create file and return result
+/// <summary>
+/// File creation helper, creates a file on disk and returns the handle in `fileHandle`
+/// </summary>
+/// <param name="filePath">
+/// File path of the file to create
+/// </param>
+/// <param name="DesiredAccess">
+/// Access mask of the file to create
+/// </param>
+/// <param name="CreationDisposition">
+/// Creation disposition of the file
+/// </param>
+/// <param name="fileHandle">
+/// Pointer that will receive the file handle on a successful file creation
+/// </param>
+/// <returns>
+/// Status of the ZwCreateFile call
+/// </returns>
 NTSTATUS CreateFileHelper(LPWSTR filePath, ACCESS_MASK DesiredAccess, ULONG CreationDisposition, PHANDLE fileHandle)
 {
 	UNREFERENCED_PARAMETER(DesiredAccess);
@@ -98,7 +80,15 @@ NTSTATUS CreateFileHelper(LPWSTR filePath, ACCESS_MASK DesiredAccess, ULONG Crea
 	return status;
 }
 
-
+/// <summary>
+/// Creates a folder at the provided path if it does not exist, note this is not recursive (e.g. if path/fold1 does not exist, then creation of path/fold1/fold2 will fail)
+/// </summary>
+/// <param name="folderPath">
+/// Path of the folder to create
+/// </param>
+/// <returns>
+/// Status of the ZwCreateFile call
+/// </returns>
 NTSTATUS CreateFolder(LPWSTR folderPath)
 {
 	HANDLE hFolder = 0;
@@ -114,7 +104,10 @@ NTSTATUS CreateFolder(LPWSTR folderPath)
 	return status;
 }
 
-
+/// <summary>
+/// Our hook function that replaces a target's FastIoControl function, we dump the input buffer and 
+/// log the metadata of this call
+/// </summary>
 bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	IN BOOLEAN Wait,
 	IN PVOID InputBuffer OPTIONAL,
@@ -125,239 +118,333 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	OUT PIO_STATUS_BLOCK IoStatus,
 	IN struct _DEVICE_OBJECT* DeviceObject)
 {
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
 
 	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
+
+	// Check if the device also has a name
 	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen+4);
-	status = ObQueryNameString(DeviceObject, pObjName, nameLen+4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen,'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+					
+				}
+
+			}
+			
+		}
+		
 	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length+2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder,16);
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+	
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder,wcslen(pCFolder));
+	
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
-	ExFreePool(pDevName);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	// Convert IOCTL to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pIoctlStringUni, 12);
-	status = RtlIntegerToUnicodeString(IoControlCode, 16, &pIoctlStringUni);
+
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pIoctlStringUni == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pIoctlStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->MaximumLength = 30;
+	status = RtlIntegerToUnicodeString(IoControlCode, 16, pIoctlStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length +2);
-	RtlZeroMemory(pIoctlString, pIoctlStringUni.Length + 2);
-	memcpy(pIoctlString, pIoctlStringUni.Buffer, pIoctlStringUni.Length+1);
-	LPWSTR hookTypeStr = L"fastIOD\0\0";
+	LPWSTR hookTypeStr = L"\\fastIOD";
 	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator,4);
-	wcsncat(pFullPath, hookTypeStr, 10);
-	wcsncat(pFullPath, pathSeperator, 4);
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pIoctlString,pIoctlStringUni.Length);
-	wcsncat(pFullPath, nullByteW, 1);
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n",pFullPath));
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, pIoctlStringUni->Buffer,pIoctlStringUni->Length / sizeof(WCHAR));
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ls.\n",pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(InputBufferLength, 16, &pInputBufLenStringUni);
+	
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(InputBufferLength, 16, pInputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer,pInputBufLenStringUni.Length+1);
+
+	
 	if (InputBufferLength > 0)
 	{
 		// Dump memory
-		LPWSTR pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR),'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator,4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		LPWSTR dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator,8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-		HANDLE hDataFile = 0; 
+		hDataFile = 0; 
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
 		// Write data to pDataFile handle
 		IO_STATUS_BLOCK statBlock;
 		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, InputBuffer, InputBufferLength, NULL, NULL);
-		
 		ZwClose(hDataFile);
+		hDataFile = NULL;
 		if (!NT_SUCCESS(status))
 		{
 			// Error writing file
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
 	}
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR),'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator,4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator,8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath,'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048*sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader,14);
-	wcsncat(confFileString, pDrvName, drvName.Length+1-8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine,4);
-	LPWSTR typeHeader = L"Type:FASTIOD\n\0\0";
-	wcsncat(confFileString, typeHeader,15);
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader,9);
-	wcsncat(confFileString, pIoctlString, pIoctlStringUni.Length+1);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pIoctlString);
-	wcsncat(confFileString, newLine,4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader,21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine,4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader,22);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096*sizeof(WCHAR),'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:FASTIOD\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, pIoctlStringUni->Buffer, pIoctlStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pIoctlStringUni->Buffer, 'PMDI',NULL,NULL);
+	ExFreePool2(pIoctlStringUni,'PMDI', NULL, NULL);
+	pIoctlStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer,'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	DECLARE_UNICODE_STRING_SIZE(pOutputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(OutputBufferLength, 16, &pOutputBufLenStringUni);
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pOutputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	if (pOutputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->MaximumLength = 60;
+	status = RtlIntegerToUnicodeString(OutputBufferLength, 16, pOutputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ZwClose(hConfFile);
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length+2);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pOutputBufLenString);
+
+	wcsncat(confFileString, pOutputBufLenStringUni->Buffer, pOutputBufLenStringUni->Length / sizeof(WCHAR));
+
+	ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI',NULL,NULL);
+	ExFreePool2(pOutputBufLenStringUni, 'PMDI',NULL,NULL);
+	pOutputBufLenStringUni = NULL;
+
 	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	if (hDataFile != NULL) {
+		ZwClose(hDataFile);
+	}
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < fastIoHooksDArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&fastIoHooksDArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			fastIoCallD origFuncCall = (fastIoCallD)fastIoHooksDArray[i].originalFunction;
+			fastIoCallD origFuncCall = (fastIoCallD)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
 			return origFuncCall(FileObject,
 				Wait,
 				InputBuffer,
@@ -369,8 +456,14 @@ End:
 				DeviceObject);
 		}
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
@@ -383,189 +476,292 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	OUT PIO_STATUS_BLOCK IoStatus,
 	IN struct _DEVICE_OBJECT* DeviceObject)
 {
-	HANDLE hDataFile = 0;
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
+
 	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
+
+	// Check if the device also has a name
 	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
 	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(DeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
+		}
+
 	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
-	
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
-	ExFreePool(pDevName);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	LPWSTR hookTypeStr = L"fastIOW\0\0";
+	LPWSTR hookTypeStr = L"\\fastIOW";
 	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 10);
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, nullByteW, 1);
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
+	status = CreateFolder(pFullPath);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(Length, 16, &pInputBufLenStringUni);
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(Length, 16, pInputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	
-	LPWSTR pDataPath = NULL;
-	LPWSTR dataTerminator = NULL;
-	IO_STATUS_BLOCK statBlock;
+
+
 	if (Length > 0)
 	{
 		// Dump memory
-		pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
-
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
+		// Write data to pDataFile handle
+		IO_STATUS_BLOCK statBlock;
+		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Buffer, Length, NULL, NULL);
+		ZwClose(hDataFile);
+		hDataFile = NULL;
+		if (!NT_SUCCESS(status))
+		{
+			// Error writing file
+			goto cleanup;
+		}
 	}
-
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:FASTIOW\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
-	wcsncat(confFileString, nullByteW, 1);
-	
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:FASTIOW\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
+
+	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	if (hDataFile != NULL) {
+		ZwClose(hDataFile);
+	}
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksWArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < fastIoHooksWArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&fastIoHooksWArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			fastIoCallRW origFuncCall = (fastIoCallRW)fastIoHooksWArray[i].originalFunction;
-			bool res = origFuncCall(FileObject,
+			fastIoCallRW origFuncCall = (fastIoCallRW)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
+			return origFuncCall(FileObject,
 				FileOffset,
 				Length,
 				Wait,
@@ -573,18 +769,16 @@ End:
 				Buffer,
 				IoStatus,
 				DeviceObject);
-			if (hDataFile > 0)
-			{
-				status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Buffer, Length, NULL, NULL);
-				ZwClose(hDataFile);
-			}
-			
-			return res;
 		}
-
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
@@ -601,201 +795,280 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	OUT PIO_STATUS_BLOCK IoStatus,
 	IN struct _DEVICE_OBJECT* DeviceObject)
 {
-	HANDLE hDataFile = 0;
-	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
-	ULONG nameLen = 0;
-	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(DeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
-	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
 
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
+	NTSTATUS status;
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
+
+	// Check if the device also has a name
+	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
+	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
+		}
+
+	}
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
-	ExFreePool(pDevName);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	LPWSTR hookTypeStr = L"fastIOR\0\0";
+	LPWSTR hookTypeStr = L"\\fastIOR";
 	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 10);
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, nullByteW, 1);
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
+	status = CreateFolder(pFullPath);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(Length, 16, &pInputBufLenStringUni);
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(Length, 16, pInputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	
-	LPWSTR pDataPath = NULL;
-	LPWSTR dataTerminator = NULL;
-	IO_STATUS_BLOCK statBlock;
+
+
 	if (Length > 0)
 	{
 		// Dump memory
-		pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-		
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
-		
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
+		// We dump the buffer later, as we need the target to fill in the buffer first.
 	}
-	
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:FASTIOR\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:FASTIOR\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	DECLARE_UNICODE_STRING_SIZE(pOutputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(Length, 16, &pOutputBufLenStringUni);
-	if (!NT_SUCCESS(status))
-	{
-		ZwClose(hConfFile);
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
-	}
-	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pOutputBufLenString);
-	
+	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksRArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < fastIoHooksRArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&fastIoHooksRArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			fastIoCallRW origFuncCall = (fastIoCallRW)fastIoHooksRArray[i].originalFunction;
+			fastIoCallRW origFuncCall = (fastIoCallRW)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
 			bool res = origFuncCall(FileObject,
 				FileOffset,
 				Length,
@@ -804,506 +1077,781 @@ End:
 				Buffer,
 				IoStatus,
 				DeviceObject);
-			if (hDataFile > 0)
-			{
+			if (Length > 0 && hDataFile != NULL) {
+
+				LowerAndCheckIRQL();
+				// Write data to pDataFile handle
+				IO_STATUS_BLOCK statBlock;
 				status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Buffer, Length, NULL, NULL);
 				ZwClose(hDataFile);
+				hDataFile = NULL;
+				RaiseAndCheckIRQL(oldIRQL);
 			}
-			
 			return res;
+			
+
 		}
-		
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
 NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	_IRP* Irp)
 {
-	HANDLE hDataFile = 0;
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
 	PIO_STACK_LOCATION pIoStackLocation;
 	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
-	ULONG nameLen = 0;
-	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(DeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
-	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
 
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
+	NTSTATUS status;
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
+
+	// Check if the device also has a name
+	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
+	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
+		}
+
+	}
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	LPWSTR hookTypeStr = L"devIOW\0\0";
+	LPWSTR hookTypeStr = L"\\devIOW";
 	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 9);
-	wcsncat(pFullPath, pathSeperator, 4);
-
-	wcsncat(pFullPath, nullByteW, 1);
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.Write.Length, 16, &pInputBufLenStringUni);
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ls.\n", pFullPath));
+	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	
-	LPWSTR pDataPath = NULL;
-	LPWSTR dataTerminator = NULL;
-	IO_STATUS_BLOCK statBlock;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.Write.Length, 16, pInputBufLenStringUni);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+
+
 	if (pIoStackLocation->Parameters.Write.Length > 0)
 	{
 		// Dump memory
-		pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
-
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
+		// Write data to pDataFile handle
+		IO_STATUS_BLOCK statBlock;
+		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Irp->AssociatedIrp.SystemBuffer, pIoStackLocation->Parameters.Write.Length, NULL, NULL);
+		ZwClose(hDataFile);
+		hDataFile = NULL;
+		if (!NT_SUCCESS(status))
+		{
+			// Error writing file
+			goto cleanup;
+		}
 	}
-
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:devIOW\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:DEVIOW\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	wcsncat(confFileString, nullByteW, 1);
-	
+	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
-	goto End;
-End:
-	// Call original overwritten address
-	for (int i = 0; i < deviceIoHooksRArrayEntries; i++)
-	{
-		if (RtlEqualUnicodeString(&deviceIoHooksRArray[i].driverName, &drvName, false))
-		{
-			devIoCallRWD origFuncCall = (devIoCallRWD)deviceIoHooksRArray[i].originalFunction;
-			NTSTATUS res = origFuncCall(DeviceObject, Irp);
-			if (hDataFile > 0)
-			{
-				status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Irp->AssociatedIrp.SystemBuffer, pIoStackLocation->Parameters.Read.Length, NULL, NULL);
-				ZwClose(hDataFile);
-			}
-
-			return res;
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
 		}
-
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	if (hDataFile != NULL) {
+		ZwClose(hDataFile);
+	}
+	goto End;
+
+End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksWArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
+	// Call original overwritten address
+	for (int i = 0; i < hookList->entry_count; i++)
+	{
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
+		{
+			devIoCallRWD  origFuncCall = (devIoCallRWD)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
+			return origFuncCall(DeviceObject, Irp);
+		}
+	}
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
 NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	_IRP* Irp)
 {
-	HANDLE hDataFile = 0;
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
 	PIO_STACK_LOCATION pIoStackLocation;
 	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName; 
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
-	ULONG nameLen = 0;
-	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(DeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
-	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
 
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
+	NTSTATUS status;
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
+
+	// Check if the device also has a name
+	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
+	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
+		}
+
+	}
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	LPWSTR hookTypeStr = L"devIOR\0\0";
+	LPWSTR hookTypeStr = L"\\devIOR";
 	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 10);
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, nullByteW, 1);
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.Read.Length, 16, &pInputBufLenStringUni);
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ls.\n", pFullPath));
+	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	
-	LPWSTR pDataPath = NULL;
-	LPWSTR dataTerminator = NULL;
-	IO_STATUS_BLOCK statBlock;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.Read.Length, 16, pInputBufLenStringUni);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+
+
 	if (pIoStackLocation->Parameters.Read.Length > 0)
 	{
 		// Dump memory
-		pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
-
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
+		// We dump the buffer later, as we need the target to fill in the buffer first.
 	}
-
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:devIOR\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, nullByteW, 1);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:DEVIOR\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	DECLARE_UNICODE_STRING_SIZE(pOutputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.Read.Length, 16, &pOutputBufLenStringUni);
-	if (!NT_SUCCESS(status))
-	{
-		ZwClose(hConfFile);
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
-	}
-	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pOutputBufLenString);
-
+	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksRArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < deviceIoHooksRArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&deviceIoHooksRArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			devIoCallRWD origFuncCall = (devIoCallRWD)deviceIoHooksRArray[i].originalFunction;
-			NTSTATUS res = origFuncCall(DeviceObject,Irp);
-			if (hDataFile > 0)
-			{
+			devIoCallRWD origFuncCall = (devIoCallRWD)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
+			NTSTATUS res = origFuncCall(DeviceObject, Irp);
+	
+			if (pIoStackLocation->Parameters.Read.Length > 0 && hDataFile != NULL) {
+
+				LowerAndCheckIRQL();
+				// Write data to pDataFile handle
+				IO_STATUS_BLOCK statBlock;
 				status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, Irp->AssociatedIrp.SystemBuffer, pIoStackLocation->Parameters.Read.Length, NULL, NULL);
 				ZwClose(hDataFile);
+				hDataFile = NULL;
+				RaiseAndCheckIRQL(oldIRQL);
 			}
-			
 			return res;
+
+
+		}
+	}
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
+}
+
+NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
+
+	PVOID inBuf = NULL;
+	PVOID outBuf = NULL;
+
+	PIO_STACK_LOCATION pIoStackLocation;
+	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
+
+	NTSTATUS status;
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
+
+	// Check if the device also has a name
+	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
+	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
 		}
 
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
-}
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
 
-NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
-{
-	PVOID inBuf;
-	PVOID outBuf;
-	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = pDeviceObject->DriverObject->DriverName;
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
-	ULONG nameLen = 0;
-	status = ObQueryNameString(pDeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(pDeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
 	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
 
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
-
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	// Convert IOCTL to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pIoctlStringUni, 12);
-	PIO_STACK_LOCATION pIoStackLocation;
-	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode, 16, &pIoctlStringUni);
+
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pIoctlStringUni == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pIoctlStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->MaximumLength = 30;
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode, 16, pIoctlStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
+	LPWSTR hookTypeStr = L"\\fastIOD";
+	// Concat ioctl string to full path
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
+	status = CreateFolder(pFullPath);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, pIoctlStringUni->Buffer, pIoctlStringUni->Length / sizeof(WCHAR));
+
+
+	// Input & output buffer location will differ based on IoControlCode
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
 	{
 	case METHOD_BUFFERED:
@@ -1315,273 +1863,381 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	case METHOD_NEITHER:
 		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
 	default:
-		ExFreePool(pObjName); ExFreePool(pFullPath); goto End;
+		// This should never be hit, something went wrong if so. Print an error and go to cleanup
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "ERROR: Unknown IOCTL method: %lu.\n", pIoStackLocation->Parameters.DeviceIoControl.IoControlCode));
+		goto cleanup;
 	}
-	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length + 2);
-	RtlZeroMemory(pIoctlString, pIoctlStringUni.Length + 2);
-	memcpy(pIoctlString, pIoctlStringUni.Buffer, pIoctlStringUni.Length + 1);
-	LPWSTR hookTypeStr = L"devIOD\0\0";
-	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 9);
-	wcsncat(pFullPath, pathSeperator, 4);
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ls.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
-	}
-	wcsncat(pFullPath, pIoctlString, pIoctlStringUni.Length);
-	wcsncat(pFullPath, nullByteW, 1);
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
-	status = CreateFolder(pFullPath);
-	if (!NT_SUCCESS(status))
-	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, 16, &pInputBufLenStringUni);
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, 16, pInputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	if (pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength > 0)
+
+
+	if (pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength > 0 && inBuf != NULL)
 	{
 		// Dump memory
-		LPWSTR pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		LPWSTR dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-		HANDLE hDataFile = 0;
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
 		// Write data to pDataFile handle
 		IO_STATUS_BLOCK statBlock;
 		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, inBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
-
 		ZwClose(hDataFile);
+		hDataFile = NULL;
 		if (!NT_SUCCESS(status))
 		{
 			// Error writing file
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
 	}
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:devIOD\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR type2Header = L"BuffType:\0\0";
-	LPWSTR buffHeader = L"METHOD_BUFFERED\n\0\0";
-	LPWSTR inDir = L"METHOD_IN_DIRECT\n\0\0";
-	LPWSTR outDir = L"METHOD_OUT_DIRECT\n\0\0";
-	LPWSTR neiDir = L"METHOD_NEITHER\n\0\0";
-	wcsncat(confFileString, type2Header, 12);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:DEVIOD\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR type2Header = L"BuffType:";
+	LPWSTR buffHeader = L"METHOD_BUFFERED\r\n";
+	LPWSTR inDir = L"METHOD_IN_DIRECT\r\n";
+	LPWSTR outDir = L"METHOD_OUT_DIRECT\r\n";
+	LPWSTR neiDir = L"METHOD_NEITHER\r\n";
+	wcsncat(confFileString, type2Header, wcslen(type2Header));
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
 	{
 	case METHOD_BUFFERED:
-		wcsncat(confFileString, buffHeader, 19); break;
+		wcsncat(confFileString, buffHeader, wcslen(buffHeader)); break;
 	case METHOD_IN_DIRECT:
-		wcsncat(confFileString, inDir, 20); break;
+		wcsncat(confFileString, inDir, wcslen(inDir)); break;
 	case METHOD_OUT_DIRECT:
-		wcsncat(confFileString, outDir, 21); break;
+		wcsncat(confFileString, outDir, wcslen(outDir)); break;
 	case METHOD_NEITHER:
-		wcsncat(confFileString, neiDir, 18); break;
+		wcsncat(confFileString, neiDir, wcslen(neiDir)); break;
 	default:
-		break;
+		goto cleanup;
 	}
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, pIoctlString, pIoctlStringUni.Length + 1);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pIoctlString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, pIoctlStringUni->Buffer, pIoctlStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	pIoctlStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	DECLARE_UNICODE_STRING_SIZE(pOutputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.OutputBufferLength, 16, &pOutputBufLenStringUni);
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pOutputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	if (pOutputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->MaximumLength = 60;
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.OutputBufferLength, 16, pOutputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ZwClose(hConfFile);
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pOutputBufLenString);
+
+	wcsncat(confFileString, pOutputBufLenStringUni->Buffer, pOutputBufLenStringUni->Length / sizeof(WCHAR));
+
+	ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	pOutputBufLenStringUni = NULL;
+
 	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	if (hDataFile != NULL) {
+		ZwClose(hDataFile);
+	}
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < deviceIoHooksDArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&deviceIoHooksDArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			devIoCallRWD origFuncCall = (devIoCallRWD)deviceIoHooksDArray[i].originalFunction;
-			return origFuncCall(pDeviceObject,Irp);
+			devIoCallRWD origFuncCall = (devIoCallRWD)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
+			return origFuncCall(DeviceObject, Irp);
 		}
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
-NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
+NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	PVOID inBuf;
-	PVOID outBuf;
-	NTSTATUS status;
-	LPWSTR pathSeperator = L"\\\0\0";
-	LPCWSTR nullByteW = L"\0\0";
-	UNICODE_STRING drvName = pDeviceObject->DriverObject->DriverName;
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
-	LPWSTR pDrvName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, drvName.Length + 2);
-	RtlZeroMemory(pDrvName, drvName.Length + 2);
-	wcsncpy(pDrvName, drvName.Buffer+8, (drvName.Length-(8*2))/2);
-	ULONG nameLen = 0;
-	status = ObQueryNameString(pDeviceObject, NULL, NULL, &nameLen);
-	POBJECT_NAME_INFORMATION pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool(NonPagedPoolNx, nameLen + 4);
-	status = ObQueryNameString(pDeviceObject, pObjName, nameLen + 4, &nameLen);
-	if (pObjName->Name.Length == 0)
-	{
-		ExFreePool(pObjName);
-	}
-	LPWSTR pDevName = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pObjName->Name.Length + 2);
-	RtlZeroMemory(pDevName, pObjName->Name.Length + 2);
-	// TODO, check if we need to skip bytes
-	memcpy(pDevName, pObjName->Name.Buffer, pObjName->Name.Length + 1);
-	LPWSTR pCFolder = L"C:\\DriverHooks\\\0\0";
+	// We need to operate in PASSIVE_IRQL due to our file operations, ensure we're at that IRQL and save the current
+	// IRQL so we can restore it later
+	KIRQL oldIRQL = LowerAndCheckIRQL();
+	// Initialize all our pointers to NULL, this allows us to check if they're non-null in our
+	// cleanup phase without concerns of accessing non-initialized pointers.
+	// Ensure whenever we free these pointers, we reset it back to NULL
+	PUNICODE_STRING pOutputBufLenStringUni = NULL;
+	LPWSTR confFileString = NULL;
+	HANDLE hConfFile = NULL;
+	LPWSTR pConfPath = NULL;
+	HANDLE hDataFile = NULL;
+	LPWSTR pDataPath = NULL;
+	PUNICODE_STRING pInputBufLenStringUni = NULL;
+	PUNICODE_STRING pIoctlStringUni = NULL;
+	LPWSTR pFullPath = NULL;
+	POBJECT_NAME_INFORMATION pObjName = NULL;
+	PUNICODE_STRING pDevName = NULL;
 
-	// Careful here with hardcoded buffer copies!
-	LPWSTR pFullPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(pFullPath, 2048 * sizeof(WCHAR));
-	LPWSTR dosDevicesPath = L"\\DosDevices\\\0\0";
-	wcsncpy(pFullPath, dosDevicesPath, 15);
-	wcsncat(pFullPath, pCFolder, 16);
+	PVOID inBuf = NULL;
+	PVOID outBuf = NULL;
+
+	PIO_STACK_LOCATION pIoStackLocation;
+	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
+
+	NTSTATUS status;
+	// Debugging print 
+	UNICODE_STRING drvName = DeviceObject->DriverObject->DriverName;
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Driver Name:%wZ.\n", drvName));
+
+	// Check if the device also has a name
+	ULONG nameLen = 0;
+	// ObQueryNameString will return the required size in nameLen if exists
+	status = ObQueryNameString(DeviceObject, NULL, NULL, &nameLen);
+	if (nameLen != 0) {
+		// Name exists, lets allocate enough room for it
+		pObjName = (POBJECT_NAME_INFORMATION)ExAllocatePool2(POOL_FLAG_NON_PAGED, nameLen, 'PMDI');
+		if (pObjName != NULL) {
+			status = ObQueryNameString(DeviceObject, pObjName, nameLen, &nameLen);
+			if (status == STATUS_SUCCESS) {
+				if (pObjName->Name.Length == 0)
+				{
+					ExFreePool(pObjName);
+				}
+				else {
+					// Name exists, lets copy it into pDevName and free the object_name_information object
+					pDevName = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
+					if (pDevName != NULL) {
+						pDevName->Length = pObjName->Name.Length;
+						pDevName->MaximumLength = pObjName->Name.MaximumLength;
+						pDevName->Buffer = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pObjName->Name.MaximumLength, 'PMDI');
+						if (pDevName->Buffer != NULL) {
+							memcpy(pDevName->Buffer, pObjName->Name.Buffer, pObjName->Name.Length);
+						}
+						// Copy finished, lets free pObjName
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+						// Detect if the copy failed due to a failed allocation
+						if (pDevName->Buffer == NULL) {
+							// Buffer failed to allocate, free pDevName and set it to NULL so we can detect the failure later
+							ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+							pDevName = NULL;
+						}
+					}
+					else {
+						// pDevName failed to allocate, free pObjName and continue
+						ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+						pObjName = NULL;
+					}
+
+				}
+
+			}
+
+		}
+
+	}
+	// Now, pDevName will either be NULL or point to a UNICODE_STRING, If it's NULL, the device name did not exist, or failed to copy
+
+
+
+
+	// Base folder for our driver hooks
+	LPWSTR pCFolder = L"C:\\DriverHooks";
+
+	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
+
+	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	if (pFullPath == NULL) {
+		goto cleanup;
+	}
+	wcsncpy_s(pFullPath, fullPathSz, pCFolder, wcslen(pCFolder));
+
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ws.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pDevName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	wcsncat(pFullPath, pDrvName, (drvName.Length - 8) / 2);
-	wcsncat(pFullPath, nullByteW, 1);
+
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pDrvName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
-	// Convert IOCTL to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pIoctlStringUni, 12);
-	PIO_STACK_LOCATION pIoStackLocation;
-	pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode, 16, &pIoctlStringUni);
+
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pIoctlStringUni == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pIoctlStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pIoctlStringUni->MaximumLength = 30;
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode, 16, pIoctlStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
+	LPWSTR hookTypeStr = L"\\fileIOD";
+	// Concat ioctl string to full path
+	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
+	status = CreateFolder(pFullPath);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	wcsncat(pFullPath, pIoctlStringUni->Buffer, pIoctlStringUni->Length / sizeof(WCHAR));
+
+
+	// Input & output buffer location will differ based on IoControlCode
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
 	{
 	case METHOD_BUFFERED:
@@ -1593,204 +2249,239 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
 	case METHOD_NEITHER:
 		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
 	default:
-		ExFreePool(pObjName); ExFreePool(pFullPath); goto End;
+		// This should never be hit, something went wrong if so. Print an error and go to cleanup
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "ERROR: Unknown IOCTL method: %lu.\n", pIoStackLocation->Parameters.DeviceIoControl.IoControlCode));
+		goto cleanup;
 	}
-	LPWSTR pIoctlString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pIoctlStringUni.Length + 2);
-	RtlZeroMemory(pIoctlString, pIoctlStringUni.Length + 2);
-	memcpy(pIoctlString, pIoctlStringUni.Buffer, pIoctlStringUni.Length + 1);
-	LPWSTR hookTypeStr = L"fileIOD\0\0";
-	// Concat ioctl string to full path
-	wcsncat(pFullPath, pathSeperator, 4);
-	wcsncat(pFullPath, hookTypeStr, 10);
-	wcsncat(pFullPath, pathSeperator, 4);
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%ls.\n", pFullPath));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
-	}
-	wcsncat(pFullPath, pIoctlString, pIoctlStringUni.Length);
-	wcsncat(pFullPath, nullByteW, 1);
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Creating folder:%s.\n", pFullPath));
-	status = CreateFolder(pFullPath);
-	if (!NT_SUCCESS(status))
-	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pIoctlString);
-		ExFreePool(pDrvName);
-		goto End;
+		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
-	// Convert inputBufLen to LPWSTR
-	// Warning again with hardcoded lengths
-	DECLARE_UNICODE_STRING_SIZE(pInputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, 16, &pInputBufLenStringUni);
+
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pInputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	if (pInputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pInputBufLenStringUni->MaximumLength = 30;
+
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, 16, pInputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pInputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pInputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pInputBufLenString, pInputBufLenStringUni.Length + 2);
-	memcpy(pInputBufLenString, pInputBufLenStringUni.Buffer, pInputBufLenStringUni.Length + 1);
-	if (pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength > 0)
+
+
+	if (pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength > 0 && inBuf != NULL)
 	{
 		// Dump memory
-		LPWSTR pDataPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-		RtlZeroMemory(pDataPath, 1024 * sizeof(WCHAR));
+		pDataPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+		RtlZeroMemory(pDataPath, 4096 * sizeof(WCHAR));
 		wcscat(pDataPath, pFullPath);
-		wcsncat(pDataPath, pathSeperator, 4);
-		wcsncat(pDataPath, pInputBufLenString, pInputBufLenStringUni.Length);
-		wcsncat(pDataPath, nullByteW, 1);
-		LPWSTR dataTerminator = L".data\0\0";
-		wcsncat(pDataPath, dataTerminator, 8);
+		wcsncat(pDataPath, L"\\", wcslen(L"\\"));
+		wcsncat(pDataPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / 2);
+		LPWSTR dataTerminator = L".data";
+		wcsncat(pDataPath, dataTerminator, wcslen(dataTerminator));
 		// Create handle to pDataPath
-		HANDLE hDataFile = 0;
+		hDataFile = 0;
 		status = CreateFileHelper(pDataPath, GENERIC_WRITE, FILE_CREATE, &hDataFile);
 		if (!NT_SUCCESS(status))
 		{
 			// File probably exists already, lets quit
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pDataPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
-		ExFreePool(pDataPath);
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+		pDataPath = NULL;
 		// Write data to pDataFile handle
 		IO_STATUS_BLOCK statBlock;
 		status = ZwWriteFile(hDataFile, NULL, NULL, NULL, &statBlock, inBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength, NULL, NULL);
-
 		ZwClose(hDataFile);
+		hDataFile = NULL;
 		if (!NT_SUCCESS(status))
 		{
 			// Error writing file
-			ExFreePool(pObjName);
-			ExFreePool(pFullPath);
-			ExFreePool(pInputBufLenString);
-			ExFreePool(pDrvName);
-			ExFreePool(pIoctlString);
-			goto End;
+			goto cleanup;
 		}
 	}
 	// Write conf
-	LPWSTR pConfPath = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 1024 * sizeof(WCHAR));
-	RtlZeroMemory(pConfPath, 1024 * sizeof(WCHAR));
+	pConfPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(pConfPath, 4096 * sizeof(WCHAR));
 	wcscpy(pConfPath, pFullPath);
-	wcsncat(pConfPath, pathSeperator, 4);
-	wcsncat(pConfPath, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(pConfPath, nullByteW, 1);
-	LPWSTR confTerminator = L".conf\0\0";
-	wcsncat(pConfPath, confTerminator, 8);
-	HANDLE hConfFile = 0;
+	wcsncat(pConfPath, L"\\", wcslen(L"\\"));
+	wcsncat(pConfPath, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	LPWSTR confTerminator = L".conf";
+	wcsncat(pConfPath, confTerminator, wcslen(confTerminator));
+	hConfFile = 0;
 	status = CreateFileHelper(pConfPath, GENERIC_WRITE, FILE_CREATE, &hConfFile);
 	if (!NT_SUCCESS(status))
 	{
 		// File probably exists already, lets quit
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		ExFreePool(pConfPath);
-		ExFreePool(pInputBufLenString);
-		ExFreePool(pDrvName);
-		ExFreePool(pIoctlString);
-		goto End;
+		goto cleanup;
 	}
-	ExFreePool(pConfPath);
+	ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	pConfPath = NULL;
 	// Write data to pConfFile handle
-	LPWSTR confFileString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, 2048 * sizeof(WCHAR));
-	RtlZeroMemory(confFileString, 2048 * sizeof(WCHAR));
-	LPWSTR drvHeader = L"DriverName:\0\0";
-	wcsncpy(confFileString, drvHeader, 14);
-	wcsncat(confFileString, pDrvName, drvName.Length + 1 - 8);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pDrvName);
-	LPWSTR newLine = L"\n\0\0";
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR typeHeader = L"Type:devIOD\n\0\0";
-	wcsncat(confFileString, typeHeader, 15);
-	LPWSTR type2Header = L"BuffType:\0\0";
-	LPWSTR buffHeader = L"METHOD_BUFFERED\n\0\0";
-	LPWSTR inDir = L"METHOD_IN_DIRECT\n\0\0";
-	LPWSTR outDir = L"METHOD_OUT_DIRECT\n\0\0";
-	LPWSTR neiDir = L"METHOD_NEITHER\n\0\0";
-	wcsncat(confFileString, type2Header, 12);
+	confFileString = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 4096 * sizeof(WCHAR), 'PMDI');
+	RtlZeroMemory(confFileString, 4096 * sizeof(WCHAR));
+	LPWSTR drvHeader = L"DriverName:";
+	wcsncpy(confFileString, drvHeader, wcslen(drvHeader));
+	wcsncat(confFileString, drvName.Buffer, drvName.Length / sizeof(WCHAR));
+	LPWSTR newLine = L"\r\n";
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR typeHeader = L"Type:FILEIOD\r\n";
+	wcsncat(confFileString, typeHeader, wcslen(typeHeader));
+	LPWSTR type2Header = L"BuffType:";
+	LPWSTR buffHeader = L"METHOD_BUFFERED\r\n";
+	LPWSTR inDir = L"METHOD_IN_DIRECT\r\n";
+	LPWSTR outDir = L"METHOD_OUT_DIRECT\r\n";
+	LPWSTR neiDir = L"METHOD_NEITHER\r\n";
+	wcsncat(confFileString, type2Header, wcslen(type2Header));
 	switch (METHOD_FROM_CTL_CODE(pIoStackLocation->Parameters.DeviceIoControl.IoControlCode))
 	{
 	case METHOD_BUFFERED:
-		wcsncat(confFileString, buffHeader, 19); break;
+		wcsncat(confFileString, buffHeader, wcslen(buffHeader)); break;
 	case METHOD_IN_DIRECT:
-		wcsncat(confFileString, inDir, 20); break;
+		wcsncat(confFileString, inDir, wcslen(inDir)); break;
 	case METHOD_OUT_DIRECT:
-		wcsncat(confFileString, outDir, 21); break;
+		wcsncat(confFileString, outDir, wcslen(outDir)); break;
 	case METHOD_NEITHER:
-		wcsncat(confFileString, neiDir, 18); break;
+		wcsncat(confFileString, neiDir, wcslen(neiDir)); break;
 	default:
-		break;
+		goto cleanup;
 	}
-	LPWSTR ioctlHeader = L"IOCTL:\0\0";
-	wcsncat(confFileString, ioctlHeader, 9);
-	wcsncat(confFileString, pIoctlString, pIoctlStringUni.Length + 1);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pIoctlString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR inputLenHeader = L"InputBufferLength:\0\0";
-	wcsncat(confFileString, inputLenHeader, 21);
-	wcsncat(confFileString, pInputBufLenString, pInputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pInputBufLenString);
-	wcsncat(confFileString, newLine, 4);
-	LPWSTR outputLenHeader = L"OutputBufferLength:\0\0";
-	wcsncat(confFileString, outputLenHeader, 22);
+	LPWSTR ioctlHeader = L"IOCTL:";
+	wcsncat(confFileString, ioctlHeader, wcslen(ioctlHeader));
+	wcsncat(confFileString, pIoctlStringUni->Buffer, pIoctlStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	pIoctlStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR inputLenHeader = L"InputBufferLength:";
+	wcsncat(confFileString, inputLenHeader, wcslen(inputLenHeader));
+	wcsncat(confFileString, pInputBufLenStringUni->Buffer, pInputBufLenStringUni->Length / sizeof(WCHAR));
+	ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	pInputBufLenStringUni = NULL;
+	wcsncat(confFileString, newLine, wcslen(newLine));
+	LPWSTR outputLenHeader = L"OutputBufferLength:";
+	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	DECLARE_UNICODE_STRING_SIZE(pOutputBufLenStringUni, 12);
-	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.OutputBufferLength, 16, &pOutputBufLenStringUni);
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	if (pOutputBufLenStringUni == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	if (pOutputBufLenStringUni->Buffer == NULL) {
+		goto cleanup;
+	}
+	pOutputBufLenStringUni->MaximumLength = 60;
+	status = RtlIntegerToUnicodeString(pIoStackLocation->Parameters.DeviceIoControl.OutputBufferLength, 16, pOutputBufLenStringUni);
 	if (!NT_SUCCESS(status))
 	{
-		ZwClose(hConfFile);
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+		goto cleanup;
 	}
-	LPWSTR pOutputBufLenString = (LPWSTR)ExAllocatePool(NonPagedPoolNx, pOutputBufLenStringUni.Length + 2);
-	RtlZeroMemory(pOutputBufLenString, pOutputBufLenStringUni.Length + 2);
-	memcpy(pOutputBufLenString, pOutputBufLenStringUni.Buffer, pOutputBufLenStringUni.Length + 1);
-	wcsncat(confFileString, pOutputBufLenString, pOutputBufLenStringUni.Length);
-	wcsncat(confFileString, nullByteW, 1);
-	ExFreePool(pOutputBufLenString);
+
+	wcsncat(confFileString, pOutputBufLenStringUni->Buffer, pOutputBufLenStringUni->Length / sizeof(WCHAR));
+
+	ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+	ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	pOutputBufLenStringUni = NULL;
+
 	IO_STATUS_BLOCK statBlock;
 	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
 	ZwClose(hConfFile);
-	if (!NT_SUCCESS(status))
-	{
-		// Error writing file
-		ExFreePool(pObjName);
-		ExFreePool(pFullPath);
-		goto End;
+	hConfFile = NULL;
+	goto cleanup;
+cleanup:
+	// Check for NULL pointers and skip them, if we have a pointer that's non-null we free it, or if its a UNICODE type, we check if ->Buffer is NULL,
+	// if not then we free that internal buffer first, then the UNICODE pointer.
+	// Make sure we initialize all pointers as NULL at the start of this function, so that they may exist here for checking if we hit an error path and 
+	// jump here early.
+	if (confFileString != NULL) {
+		ExFreePool2(confFileString, 'PMDI', NULL, NULL);
 	}
-	ExFreePool(pObjName);
-	ExFreePool(pFullPath);
+	if (pConfPath != NULL) {
+		ExFreePool2(pConfPath, 'PMDI', NULL, NULL);
+	}
+	if (pDataPath != NULL) {
+		ExFreePool2(pDataPath, 'PMDI', NULL, NULL);
+	}
+	if (pFullPath != NULL) {
+		ExFreePool2(pFullPath, 'PMDI', NULL, NULL);
+	}
+	if (pObjName != NULL) {
+		ExFreePool2(pObjName, 'PMDI', NULL, NULL);
+	}
+	if (pOutputBufLenStringUni != NULL) {
+		if (pOutputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pOutputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pOutputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pInputBufLenStringUni != NULL) {
+		if (pInputBufLenStringUni->Buffer != NULL) {
+			ExFreePool2(pInputBufLenStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pInputBufLenStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pIoctlStringUni != NULL) {
+		if (pIoctlStringUni->Buffer != NULL) {
+			ExFreePool2(pIoctlStringUni->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pIoctlStringUni, 'PMDI', NULL, NULL);
+	}
+	if (pDevName != NULL) {
+		if (pDevName->Buffer != NULL) {
+			ExFreePool2(pDevName->Buffer, 'PMDI', NULL, NULL);
+		}
+		ExFreePool2(pDevName, 'PMDI', NULL, NULL);
+	}
+	// Check and close handles
+	if (hConfFile != NULL) {
+		ZwClose(hConfFile);
+	}
+	if (hDataFile != NULL) {
+		ZwClose(hDataFile);
+	}
 	goto End;
+
 End:
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fileIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+
 	// Call original overwritten address
-	for (int i = 0; i < deviceIoHooksDArrayEntries; i++)
+	for (int i = 0; i < hookList->entry_count; i++)
 	{
-		if (RtlEqualUnicodeString(&deviceIoHooksDArray[i].driverName, &drvName, false))
+		if (RtlEqualUnicodeString(&hookList->entries[i].driverName, &drvName, false))
 		{
-			devIoCallRWD origFuncCall = (devIoCallRWD)deviceIoHooksDArray[i].originalFunction;
-			return origFuncCall(pDeviceObject, Irp);
+			devIoCallRWD origFuncCall = (devIoCallRWD)hookList->entries[i].originalFunction;
+			// Release lock
+			ExReleaseFastMutex(hookList->lock);
+			// Revert IRQL to value when we were called
+			RaiseAndCheckIRQL(oldIRQL);
+			// Call the original function now that we've logged it, then
+			// return to caller
+			return origFuncCall(DeviceObject, Irp);
 		}
 	}
-	// Oops, cant find original device ioctl address. Return something!
-	return false;
+	// Release lock
+	ExReleaseFastMutex(hookList->lock);
+	// Rever IRQL
+	RaiseAndCheckIRQL(oldIRQL);
+	// Oops, cant find original hook address as something went wrong. We should never hit here, for debug purposes we crash the system. Alternatively, return 
+	// a fake result to continue system execution
+	__debugbreak();
+	//return false;
 }
 
 
@@ -1799,7 +2490,19 @@ End:
 
 
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `FastIoHookD` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddFastIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 	
@@ -1807,30 +2510,59 @@ NTSTATUS AddFastIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (fastIoHooksDArray == NULL)
-	{
-		int tmpLen = 20;
-		fastIoHooksDArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen*sizeof(IoHooks));
-		RtlZeroMemory(fastIoHooksDArray, tmpLen * sizeof(IoHooks));
-		fastIoHooksDArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (fastIoHooksDArrayLen == (fastIoHooksDArrayEntries - 1))
-	{
-		ULONGLONG newLen = fastIoHooksDArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, fastIoHooksDArray, fastIoHooksDArrayLen);
-		ExFreePool(fastIoHooksDArray);
-		fastIoHooksDArray = tmpArr;
-		fastIoHooksDArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	fastIoHooksDArray[fastIoHooksDArrayEntries] = newHook;
-	fastIoHooksDArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `FastIoHookR` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddFastIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1838,31 +2570,60 @@ NTSTATUS AddFastIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (fastIoHooksRArray == NULL)
-	{
-		int tmpLen = 20;
-		fastIoHooksRArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(fastIoHooksRArray, tmpLen * sizeof(IoHooks));
-		fastIoHooksRArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksRArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (fastIoHooksRArrayLen == (fastIoHooksRArrayEntries - 1))
-	{
-		ULONGLONG newLen = fastIoHooksRArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, fastIoHooksRArray, fastIoHooksRArrayLen);
-		ExFreePool(fastIoHooksRArray);
-		fastIoHooksRArray = tmpArr;
-		fastIoHooksRArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	fastIoHooksRArray[fastIoHooksRArrayEntries] = newHook;
-	fastIoHooksRArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `FastIoHookW` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddFastIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1870,30 +2631,59 @@ NTSTATUS AddFastIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (fastIoHooksWArray == NULL)
-	{
-		int tmpLen = 20;
-		fastIoHooksWArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(fastIoHooksWArray, tmpLen * sizeof(IoHooks));
-		fastIoHooksWArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fastIoHooksWArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (fastIoHooksWArrayLen == (fastIoHooksWArrayEntries - 1))
-	{
-		ULONGLONG newLen = fastIoHooksWArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, fastIoHooksWArray, fastIoHooksWArrayLen);
-		ExFreePool(fastIoHooksWArray);
-		fastIoHooksWArray = tmpArr;
-		fastIoHooksWArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	fastIoHooksWArray[fastIoHooksWArrayEntries] = newHook;
-	fastIoHooksWArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `DeviceIoHookD` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddDeviceIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1901,30 +2691,59 @@ NTSTATUS AddDeviceIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (deviceIoHooksDArray == NULL)
-	{
-		int tmpLen = 20;
-		deviceIoHooksDArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(deviceIoHooksDArray, tmpLen * sizeof(IoHooks));
-		deviceIoHooksDArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (deviceIoHooksDArrayLen == (deviceIoHooksDArrayEntries - 1))
-	{
-		ULONGLONG newLen = deviceIoHooksDArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, deviceIoHooksDArray, deviceIoHooksDArrayLen);
-		ExFreePool(deviceIoHooksDArray);
-		deviceIoHooksDArray = tmpArr;
-		deviceIoHooksDArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	deviceIoHooksDArray[deviceIoHooksDArrayEntries] = newHook;
-	deviceIoHooksDArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `DeviceIoHookR` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddDeviceIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1932,30 +2751,59 @@ NTSTATUS AddDeviceIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (deviceIoHooksRArray == NULL)
-	{
-		int tmpLen = 20;
-		deviceIoHooksRArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(deviceIoHooksRArray, tmpLen * sizeof(IoHooks));
-		deviceIoHooksRArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (deviceIoHooksRArrayLen == (deviceIoHooksRArrayEntries - 1))
-	{
-		ULONGLONG newLen = deviceIoHooksRArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, deviceIoHooksRArray, deviceIoHooksRArrayLen);
-		ExFreePool(deviceIoHooksRArray);
-		deviceIoHooksRArray = tmpArr;
-		deviceIoHooksRArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	deviceIoHooksRArray[deviceIoHooksRArrayEntries] = newHook;
-	deviceIoHooksRArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `DeviceIoHookW` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddDeviceIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1963,30 +2811,59 @@ NTSTATUS AddDeviceIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (deviceIoHooksWArray == NULL)
-	{
-		int tmpLen = 20;
-		deviceIoHooksWArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(deviceIoHooksWArray, tmpLen * sizeof(IoHooks));
-		deviceIoHooksWArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = deviceIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (deviceIoHooksWArrayLen == (deviceIoHooksWArrayEntries - 1))
-	{
-		ULONGLONG newLen = deviceIoHooksWArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, deviceIoHooksWArray, deviceIoHooksWArrayLen);
-		ExFreePool(deviceIoHooksWArray);
-		deviceIoHooksWArray = tmpArr;
-		deviceIoHooksWArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	deviceIoHooksWArray[deviceIoHooksWArrayEntries] = newHook;
-	deviceIoHooksWArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-// TODO > Check if hook already exists
+/// <summary>
+/// Hooks the target function as a `FileIoHookD` type,
+/// </summary>
+/// <param name="originalFunc">
+/// Pointer to the original function we're overwriting
+/// </param>
+/// <param name="hookDumpFunc">
+/// Our function that will replace the original target function
+/// </param>
+/// <param name="driverName">
+/// The name of the device driver we're hooking
+/// </param>
+/// <returns></returns>
 NTSTATUS AddFileIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING driverName)
 {
 
@@ -1994,35 +2871,68 @@ NTSTATUS AddFileIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	newHook.driverName = driverName;
 	newHook.originalFunction = *originalFunc;
 	newHook.hookedAddress = originalFunc;
-	if (fileIoHooksDArray == NULL)
-	{
-		int tmpLen = 20;
-		fileIoHooksDArray = (IoHooks*)ExAllocatePool(NonPagedPoolNx, tmpLen * sizeof(IoHooks));
-		RtlZeroMemory(fileIoHooksDArray, tmpLen * sizeof(IoHooks));
-		fileIoHooksDArrayLen = tmpLen;
+
+	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
+	IoHookList* hookList = fileIoHooksDArray;
+
+	// Obtain lock to our IoHookList to prevent concurrency issues
+	ExAcquireFastMutex(hookList->lock);
+	// Execution has resumed, meaning we have obtained the lock, we can continue processing and ensure we release the lock
+	// before returning from this function
+
+	// Check if there is room to add a new hook
+	if (hookList->entry_count == hookList->entry_max) {
+		// No room to add hook, release the lock and return an error
+		ExReleaseFastMutex(hookList->lock);
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	else if (fileIoHooksDArrayLen == (fileIoHooksDArrayEntries - 1))
-	{
-		ULONGLONG newLen = fileIoHooksDArrayLen + 20;
-		IoHooks* tmpArr = (IoHooks*)ExAllocatePool(NonPagedPoolNx, newLen);
-		RtlZeroMemory(tmpArr, newLen);
-		memcpy(tmpArr, fileIoHooksDArray, fileIoHooksDArrayLen);
-		ExFreePool(fileIoHooksDArray);
-		fileIoHooksDArray = tmpArr;
-		fileIoHooksDArrayLen = newLen;
+	// We have room to add a new hook, the array is always sorted such that there are no gaps between hooks, this means
+	// the next free index in the array is always the count of elements (we ensure we don't remove hooks, or if we do, we re-sort the array to eliminate gaps between entries)
+
+	// Before we add the entry, lets ensure the entry doesn't already exist
+	for (int i = 0; i < hookList->entry_count; i++) {
+		if (hookList->entries[i].originalFunction == originalFunc) {
+			// Target function is already hooked, release lock and return error
+			ExReleaseFastMutex(hookList->lock);
+			return STATUS_INVALID_PARAMETER;
+		}
 	}
-	fileIoHooksDArray[fileIoHooksDArrayEntries] = newHook;
-	fileIoHooksDArrayEntries += 1;
+	// If we reach here, hook doesn't exist, we can add our new hook
+	hookList->entries[hookList->entry_count] = newHook;
+	// Increment entry_count to the next free index
+	hookList->entry_count += 1;
+	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
+	// Ideally we should take precautions like raising our IRQL, that's a TODO
 	*originalFunc = hookDumpFunc;
+
+	// release hook
+	ExReleaseFastMutex(hookList->lock);
+
 	return STATUS_SUCCESS;
 }
 
-
+/// <summary>
+/// Hook the target `address`, saving the hook metadata into the appropriate global depending on the `type` parameter.
+/// </summary>
+/// <param name="address">
+/// Kernel address to hook, should be a FastIo or DeviceIo function for the target driver
+/// </param>
+/// <param name="type">
+/// Type of function we're hooking, should be a FastIo* or DeviceIo* type
+/// </param>
+/// <param name="driverName">
+/// Name of the device driver we're hooking, used for bookkeeping purposes
+/// </param>
+/// <returns>
+/// Success, unless the hook type is invalid
+/// </returns>
 NTSTATUS DoManualHook(PVOID* address, short type, UNICODE_STRING driverName)
 {
 	NTSTATUS status;
 	PVOID hookDumpFunc;
 	PVOID* originalFunc = address;
+	// If type is valid, we call the appropriate hook function that will hook the address and save the hook metadata based
+	// on the type.
 	switch (type)
 	{
 	case TYPE_FASTIOD:
@@ -2047,14 +2957,26 @@ NTSTATUS DoManualHook(PVOID* address, short type, UNICODE_STRING driverName)
 
 }
 
-// Uses offsets, lets hope they dont change. Or add version checks
+/// <summary>
+/// Find the IOCTL handlers for a target device driver and hook them
+/// </summary>
+/// <param name="driverName">
+/// The name of a target device driver to hook
+/// </param>
+/// <returns>
+/// Status code indicating success or failure
+/// </returns>
 NTSTATUS DoAutoHook(UNICODE_STRING driverName)
 {
 	NTSTATUS status;
 	PFILE_OBJECT phFile = NULL;
 	PDEVICE_OBJECT phDev = NULL;
-
-	status = IoGetDeviceObjectPointer(&driverName, FILE_ALL_ACCESS, &phFile, &phDev);
+	// Use IoGetDeviceObjectPointer to get the associated Device (then, Driver) object
+	// for the target, once we obtain the object we can find the IOCTL handlers inside the
+	// object struct.
+	status = IoGetDeviceObjectPointer(&driverName, FILE_READ_ACCESS, &phFile, &phDev);
+	// Check if we succeeded, if not then print an error to any attached kernel debugger and return the appropriate
+	// status to the user.
 	if (!NT_SUCCESS(status))
 	{
 		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Error: Failed to find driver:%wZ. ",driverName));
@@ -2079,6 +3001,7 @@ NTSTATUS DoAutoHook(UNICODE_STRING driverName)
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "Info: Attempting to hook:%wZ.\n", driverName));
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "Info: Device object:%p\n. ", phDev));
 	PDRIVER_OBJECT phDriv = phDev->DriverObject;
+	// Check if FastIoDispatch routines are set for our target, if they are then we ensure we hook them too
 	PFAST_IO_DISPATCH fastIoDispatch = phDriv->FastIoDispatch;
 	if (fastIoDispatch != NULL)
 	{
@@ -2086,7 +3009,9 @@ NTSTATUS DoAutoHook(UNICODE_STRING driverName)
 		status = DoManualHook((PVOID*)&fastIoDispatch->FastIoRead, TYPE_FASTIOR, phDriv->DriverName);
 		status = DoManualHook((PVOID*)&fastIoDispatch->FastIoWrite, TYPE_FASTIOW, phDriv->DriverName);
 	}
-	
+	// The handlers below should always be set for any driver (if they're unimplemeneted, they'll be still be set to a dummy
+	// handler, therefore its always safe to hook without checking for their existance, unlike their FastIo counterparts)
+	// We hook each function, passing the address to hook and the function type & driver name to our `DoManualHook` function.
 	status = DoManualHook((PVOID*)&phDriv->MajorFunction[IRP_MJ_DEVICE_CONTROL], TYPE_DEVICEIOD, phDriv->DriverName);
 	status = DoManualHook((PVOID*)&phDriv->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL], TYPE_FILEIOD, phDriv->DriverName);
 	status = DoManualHook((PVOID*)&phDriv->MajorFunction[IRP_MJ_READ], TYPE_DEVICEIOR, phDriv->DriverName);
@@ -2094,27 +3019,48 @@ NTSTATUS DoAutoHook(UNICODE_STRING driverName)
 	return status;
 }
 
+/// <summary>
+/// Parse the `HookRequest` provided by user via IOCTL.
+/// We will determine what the mode is, and hook as appropriate.
+/// Manual hooks will hook the user provided address and interpret it as the `HookRequest.Type` function.
+/// Auto hooks will use the user-provided driverName and our knowledge of the driver structure to 
+/// automatically find and hook the target driver's IOCTLs.
+/// For most cases, the AutoHook mode is expected.
+/// </summary>
+/// <param name="hookRequest"></param>
+/// <returns></returns>
 NTSTATUS DoHook(HookRequest* hookRequest)
 {
 	NTSTATUS status;
 	if (hookRequest->mode == MODE_MANUAL)
 	{
+		// Manual hook mode proivded, we pass the address, type, and name to perform the manual hook
 		status = DoManualHook(hookRequest->address, hookRequest->type, hookRequest->driverName);
 		return status;
 	}
 	else if (hookRequest->mode == MODE_AUTO)
 	{
-		// TODO
+		// Auto hook mode provided, we pass the target driver name to our next function that will automatically find 
+		// and hook the IOCTL interfaces for the target.
 		status = DoAutoHook(hookRequest->driverName);
 		return status;
 	}
 	else {
+		// Invalid `HookRequest` mode passed, we return an error to the client.
 		status = STATUS_ILLEGAL_FUNCTION;
 	}
 	return status;
 }
 
-// TODO
+/// <summary>
+/// This function receives input from user-mode programs, here we pass the input as a `HookRequest` struct, and
+/// we hook the IOCTL functions for the driver specified in the `HookRequest`. All hooks are managed in an array
+/// where we can unhook them on driver unload.
+/// When a hook is hit, we log the IOCTL call and input, then call the original target function for the hooked device driver.
+/// </summary>
+/// <param name="DeviceObject"></param>
+/// <param name="Irp"></param>
+/// <returns></returns>
 NTSTATUS
 IoDeviceControlFunc(
 	PDEVICE_OBJECT DeviceObject,
@@ -2125,25 +3071,30 @@ IoDeviceControlFunc(
 	NTSTATUS status = STATUS_SUCCESS;
 	PIO_STACK_LOCATION irpSp;
 	irpSp = IoGetCurrentIrpStackLocation(Irp);
+	// Validate the input buffer length, it should be the size of a `HookRequest` struct only.
 	ULONG inBufLength = irpSp->Parameters.DeviceIoControl.InputBufferLength;
-	if (!inBufLength)
-	{
-		status = STATUS_INVALID_PARAMETER;
-		goto End;
-	}
 	if (inBufLength != sizeof(HookRequest))
 	{
+		// Invalid size, return invalid parameter status to notify the client/user
 		status = STATUS_INVALID_PARAMETER;
 		goto End;
 	}
 	HookRequest* hookRequest;
+	// Check the IoControlCode method, we only expect parameters to be passed via METHOD_BUFFERED, this is the only
+	// ioctl we expect
 	switch (irpSp->Parameters.DeviceIoControl.IoControlCode)
 	{
 	case IOCTL_DUMP_METHOD_BUFFERED:
+		// The parameter passing method was as expected, we can interpret the input from the user as a `HookRequest` and process this
+		// in our `DoHook` function and return the status obtained from processing the input.
+		// Note that since we are using METHOD_BUFFERED, it is safe to use the `SystemBuffer` directly as it is safely in kernel-memory and 
+		// no longer modifiable by the user.
 		hookRequest = (HookRequest*)Irp->AssociatedIrp.SystemBuffer;
 		status = DoHook(hookRequest); goto End;
-
+	
 	default:
+		// If we hit this code, the ioctl received did not provide the right parameter passing method we expected,
+		// we return invalid parameter to notify the client.
 		status = STATUS_INVALID_PARAMETER; goto End;
 
 	}
@@ -2156,12 +3107,17 @@ End:
 
 
 
-// TODO
+/// <summary>
+/// Unloads our driver, if we have hooks applied we will enumerate our hooks and restore
+/// them to their original code (i.e unhook).
+/// </summary>
+/// <param name="DriverObject"></param>
 VOID
 UnloadDriver(
 	_In_ PDRIVER_OBJECT DriverObject
 )
 {
+
 	DECLARE_UNICODE_STRING_SIZE(DosDeviceName, 40);
 	RtlInitUnicodeString(&DosDeviceName, DOS_DEVICE_NAME);
 	IoDeleteSymbolicLink(&DosDeviceName);
@@ -2169,89 +3125,109 @@ UnloadDriver(
 
 	if (fastIoHooksDArray != NULL)
 	{
-		for (int i = 0; i < fastIoHooksDArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(fastIoHooksDArray->lock);
+		for (int i = 0; i < fastIoHooksDArray->entry_count; i++)
 		{
-			fastIoHooksDArray[i].hookedAddress = fastIoHooksDArray[i].originalFunction;
+			fastIoHooksDArray->entries[i].hookedAddress = fastIoHooksDArray->entries[i].originalFunction;
 		}
-		fastIoHooksDArrayEntries = 0;
-		fastIoHooksDArrayLen = 0;
-		ExFreePool(fastIoHooksDArray);
+		ExReleaseFastMutex(fastIoHooksDArray->lock);
+		ExFreePool2(fastIoHooksDArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksDArray,'PMDI',NULL,NULL);
 		
 	}
 	
 
 	if (fastIoHooksWArray != NULL)
 	{
-		for (int i = 0; i < fastIoHooksWArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(fastIoHooksWArray->lock);
+		for (int i = 0; i < fastIoHooksWArray->entry_count; i++)
 		{
-			fastIoHooksWArray[i].hookedAddress = fastIoHooksWArray[i].originalFunction;
+			fastIoHooksWArray->entries[i].hookedAddress = fastIoHooksWArray->entries[i].originalFunction;
 		}
-		fastIoHooksWArrayEntries = 0;
-		fastIoHooksWArrayLen = 0;
-		ExFreePool(fastIoHooksWArray);
+		ExReleaseFastMutex(fastIoHooksWArray->lock);
+		ExFreePool2(fastIoHooksWArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksWArray,'PMDI',NULL,NULL);
 		
 	}
 	
 	if (fastIoHooksRArray != NULL)
 	{
-		for (int i = 0; i < fastIoHooksRArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(fastIoHooksRArray->lock);
+		for (int i = 0; i < fastIoHooksRArray->entry_count; i++)
 		{
-			fastIoHooksRArray[i].hookedAddress = fastIoHooksRArray[i].originalFunction;
+			fastIoHooksRArray->entries[i].hookedAddress = fastIoHooksRArray->entries[i].originalFunction;
 		}
-		fastIoHooksRArrayEntries = 0;
-		fastIoHooksRArrayLen = 0;
-		ExFreePool(fastIoHooksRArray);
+		ExReleaseFastMutex(fastIoHooksRArray->lock);
+		ExFreePool2(fastIoHooksRArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRArray,'PMDI',NULL,NULL);
 		
 	}
 	if (deviceIoHooksRArray != NULL)
 	{
-		for (int i = 0; i < deviceIoHooksRArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(deviceIoHooksRArray->lock);
+		for (int i = 0; i < deviceIoHooksRArray->entry_count; i++)
 		{
-			deviceIoHooksRArray[i].hookedAddress = deviceIoHooksRArray[i].originalFunction;
+			deviceIoHooksRArray->entries[i].hookedAddress = deviceIoHooksRArray->entries[i].originalFunction;
 		}
-		deviceIoHooksRArrayEntries = 0;
-		deviceIoHooksRArrayLen = 0;
-		ExFreePool(deviceIoHooksRArray);
+		ExReleaseFastMutex(deviceIoHooksRArray->lock);
+		ExFreePool2(deviceIoHooksRArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksRArray,'PMDI',NULL,NULL);
 		
 	}
 	if (deviceIoHooksWArray != NULL)
 	{
-		for (int i = 0; i < deviceIoHooksWArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(deviceIoHooksWArray->lock);
+		for (int i = 0; i < deviceIoHooksWArray->entry_count; i++)
 		{
-			deviceIoHooksWArray[i].hookedAddress = deviceIoHooksWArray[i].originalFunction;
+			deviceIoHooksWArray->entries[i].hookedAddress = deviceIoHooksWArray->entries[i].originalFunction;
 		}
-		deviceIoHooksWArrayEntries = 0;
-		deviceIoHooksWArrayLen = 0;
-		ExFreePool(deviceIoHooksWArray);
+		ExReleaseFastMutex(deviceIoHooksWArray->lock);
+		ExFreePool2(deviceIoHooksWArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksWArray,'PMDI',NULL,NULL);
 		
 	}
 	if (deviceIoHooksDArray != NULL)
 	{
-		for (int i = 0; i < deviceIoHooksDArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(deviceIoHooksDArray->lock);
+		for (int i = 0; i < deviceIoHooksDArray->entry_count; i++)
 		{
-			deviceIoHooksDArray[i].hookedAddress = deviceIoHooksDArray[i].originalFunction;
+			deviceIoHooksDArray->entries[i].hookedAddress = deviceIoHooksDArray->entries[i].originalFunction;
 		}
-		deviceIoHooksDArrayEntries = 0;
-		deviceIoHooksDArrayLen = 0;
-		ExFreePool(deviceIoHooksDArray);
+		ExReleaseFastMutex(deviceIoHooksDArray->lock);
+		ExFreePool2(deviceIoHooksDArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksDArray,'PMDI',NULL,NULL);
 		
 	}
 	if (fileIoHooksDArray != NULL)
 	{
-		for (int i = 0; i < fileIoHooksDArrayEntries; i++)
+		// Obtain lock to our IoHookList to prevent concurrency issues
+		ExAcquireFastMutex(fileIoHooksDArray->lock);
+		for (int i = 0; i < fileIoHooksDArray->entry_count; i++)
 		{
-			fileIoHooksDArray[i].hookedAddress = fileIoHooksDArray[i].originalFunction;
+			fileIoHooksDArray->entries[i].hookedAddress = fileIoHooksDArray->entries[i].originalFunction;
 		}
-		fileIoHooksDArrayEntries = 0;
-		fileIoHooksDArrayLen = 0;
-		ExFreePool(fileIoHooksDArray);
+		ExReleaseFastMutex(fileIoHooksDArray->lock);
+		ExFreePool2(fileIoHooksDArray->lock, 'PMDI', NULL, NULL);
+		ExFreePool2(fileIoHooksDArray,'PMDI',NULL,NULL);
 		
 	}
 	
 	return;
 }
 
-
+/// <summary>
+/// This function is called when a program attempts to open or close a handle to our device driver. We allow any program
+/// that can reach this code to obtain or close handles to it.
+/// </summary>
+/// <param name="DeviceObject"></param>
+/// <param name="Irp"></param>
+/// <returns></returns>
 NTSTATUS
 ioctlCreateClose(
 	PDEVICE_OBJECT DeviceObject,
@@ -2259,16 +3235,17 @@ ioctlCreateClose(
 )
 {
 	UNREFERENCED_PARAMETER(DeviceObject);
-
+	// This code can be paged as it should only be run in PASSIVE_IRQL
 	PAGED_CODE();
-
+	// Arbitrarly allow programs to obtain/close handles
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	Irp->IoStatus.Information = 0;
-
+	// Complete the requesting IRP and return success
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	return STATUS_SUCCESS;
 }
+
 
 NTSTATUS
 ioctlCleanup(
@@ -2285,6 +3262,20 @@ ioctlCleanup(
 	return STATUS_SUCCESS;
 }
 
+
+/// <summary>
+/// Entry point for the Driver, will initialize the device for user->driver comms.
+/// </summary>
+/// <param name="drvObj">
+/// Pointer to this Driver's `DRIVER_OBJECT` as provided by the OS
+/// </param>
+/// <param name="regPath">
+/// Pointer to this Driver's Regpath as provided by the OS
+/// </param>
+/// <returns>
+/// Success if there was no errors creating the associated Ioctld device. This function should always be successful unless
+/// the device name has been taken (likely by another instance of this driver).
+/// </returns>
 NTSTATUS DriverEntry(
 	PDRIVER_OBJECT drvObj,
 	PUNICODE_STRING regPath
@@ -2295,15 +3286,152 @@ NTSTATUS DriverEntry(
 	NTSTATUS status;
 	PDEVICE_OBJECT deviceObject;
 	UNICODE_STRING ntUnicodeString;
+
+	// Initialize the global structs used for saving hook metadata
+	// Allow at most 20 hooks per hook-type, configure this number as-per your requirements
+	ULONGLONG entry_max_len = 20;
+	SIZE_T entry_array_size = entry_max_len * sizeof(IoHooks);
+	// Allocate enough space for our IoHookList struct + the size of our entries array
+	fastIoHooksDArray = (IoHookList*) ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (fastIoHooksDArray == NULL) {
+		goto failed_allocation;
+	}
+	fastIoHooksRArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (fastIoHooksRArray == NULL) {
+		goto failed_allocation;
+	}
+	fastIoHooksWArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (fastIoHooksWArray == NULL) {
+		goto failed_allocation;
+	}
+	deviceIoHooksDArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (deviceIoHooksDArray == NULL) {
+		goto failed_allocation;
+	}
+	deviceIoHooksWArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (deviceIoHooksWArray == NULL) {
+		goto failed_allocation;
+	}
+	deviceIoHooksRArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (deviceIoHooksRArray == NULL) {
+		goto failed_allocation;
+	}
+	fileIoHooksDArray = (IoHookList*)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(IoHookList) + entry_array_size, 'PMDI');
+	if (fileIoHooksDArray == NULL) {
+		goto failed_allocation;
+	}
+
+	// Initialize the max len and entry count in our IoHookLists
+	fastIoHooksDArray->entry_max = entry_max_len;
+	fastIoHooksDArray->entry_count = 0;
+	
+	fastIoHooksRArray->entry_max = entry_max_len;
+	fastIoHooksRArray->entry_count = 0;
+
+	fastIoHooksWArray->entry_max = entry_max_len;
+	fastIoHooksWArray->entry_count = 0;
+	
+	deviceIoHooksDArray->entry_max = entry_max_len;
+	deviceIoHooksDArray->entry_count = 0;
+
+	deviceIoHooksWArray->entry_max = entry_max_len;
+	deviceIoHooksWArray->entry_count = 0;
+
+	deviceIoHooksRArray->entry_max = entry_max_len;
+	deviceIoHooksRArray->entry_count = 0;
+
+	fileIoHooksDArray->entry_max = entry_max_len;
+	fileIoHooksDArray->entry_count = 0;
+
+	// Initialize the locks for each IoHookList
+	PFAST_MUTEX fastIoHooksDMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (fastIoHooksDMutex == NULL) {
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX fastIoHooksRMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (fastIoHooksRMutex == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX fastIoHooksWMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (fastIoHooksWMutex == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX deviceIoHooksDMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (deviceIoHooksDMutex == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksWMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX deviceIoHooksWMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (deviceIoHooksWArray == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksWMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksDMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX deviceIoHooksRMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (deviceIoHooksRMutex == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksWMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksWMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+
+	PFAST_MUTEX fileIoHooksDMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
+	if (fileIoHooksDMutex == NULL) {
+		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(fastIoHooksWMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksDMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksWMutex, 'PMDI', NULL, NULL);
+		ExFreePool2(deviceIoHooksRMutex, 'PMDI', NULL, NULL);
+		goto failed_allocation;
+	}
+	
+	// Initialize Mutex, these mutexes must be held/locked when operating
+	// on their respective IoHookList
+	ExInitializeFastMutex(fastIoHooksDMutex);
+	ExInitializeFastMutex(fastIoHooksRMutex);
+	ExInitializeFastMutex(fastIoHooksWMutex);
+	ExInitializeFastMutex(deviceIoHooksDMutex);
+	ExInitializeFastMutex(deviceIoHooksWMutex);
+	ExInitializeFastMutex(deviceIoHooksRMutex);
+	ExInitializeFastMutex(fileIoHooksDMutex);
+
+	// Set mutex in their respective IoHookList
+	fastIoHooksDArray->lock = fastIoHooksDMutex;
+	fastIoHooksRArray->lock = fastIoHooksRMutex;
+	fastIoHooksWArray->lock = fastIoHooksWMutex;
+	deviceIoHooksDArray->lock = deviceIoHooksDMutex;
+	deviceIoHooksWArray->lock = deviceIoHooksWMutex;
+	deviceIoHooksRArray->lock = deviceIoHooksRMutex;
+	fileIoHooksDArray->lock = fileIoHooksDMutex;
+
+
+	// Create the device object for user->driver communcation
 	RtlInitUnicodeString(&ntUnicodeString, NT_DEVICE_NAME);
 	status = IoCreateDevice(drvObj, 0, &ntUnicodeString, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &deviceObject);
 	if (!NT_SUCCESS(status))
 	{
+		// Likely only hit this path if the device name is taken
 		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Error: Failed to create device.\n"));
 		RtlFreeUnicodeString(&ntUnicodeString);
 		return STATUS_FAILED_DRIVER_ENTRY;
 	}
 	UNICODE_STRING ntWin32NameString;
+	// Create the associated DosDevice name, again for user->driver communication
 	RtlInitUnicodeString(&ntWin32NameString, DOS_DEVICE_NAME);
 	status = IoCreateSymbolicLink(&ntWin32NameString, &ntUnicodeString);
 	if (!NT_SUCCESS(status))
@@ -2314,10 +3442,44 @@ NTSTATUS DriverEntry(
 		RtlFreeUnicodeString(&ntUnicodeString);
 		return STATUS_FAILED_DRIVER_ENTRY;
 	}
+	// Create a link to our IOCTL handler as we use this for user->driver communication
 	drvObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = IoDeviceControlFunc;
+	// We create links to our create/close handlers to permit user programs to open and close handles
+	// to our device driver.
 	drvObj->MajorFunction[IRP_MJ_CREATE] = ioctlCreateClose;
 	drvObj->MajorFunction[IRP_MJ_CLOSE] = ioctlCreateClose;
+	// Link our cleanup routine for when the driver is unloaded
 	drvObj->MajorFunction[IRP_MJ_CLEANUP] = ioctlCleanup;
+	// Set the unload function to permit driver unloads
 	drvObj->DriverUnload = UnloadDriver;
+	// Initialization is completed, we can return success and expect calls to our create/close and IOCTL handler
+	// after this point.
 	return STATUS_SUCCESS;
+
+failed_allocation:
+	// An allocation for one of our global IoHookLists failed, lets cleanup and return an error
+	// Check if any of the allocations succeeded, and free their allocated memory.
+	if (fastIoHooksDArray != NULL){
+		ExFreePool2(fastIoHooksDArray, 'PMDI', NULL, NULL);
+	}
+	if (fastIoHooksRArray != NULL) {
+		ExFreePool2(fastIoHooksRArray, 'PMDI', NULL, NULL);
+	}
+	if (fastIoHooksWArray != NULL) {
+		ExFreePool2(fastIoHooksWArray, 'PMDI', NULL, NULL);
+	}
+	if (deviceIoHooksDArray != NULL) {
+		ExFreePool2(deviceIoHooksDArray, 'PMDI', NULL, NULL);
+	}
+	if (deviceIoHooksWArray != NULL) {
+		ExFreePool2(deviceIoHooksWArray, 'PMDI', NULL, NULL);
+	}
+	if (deviceIoHooksRArray != NULL) {
+		ExFreePool2(deviceIoHooksRArray, 'PMDI', NULL, NULL);
+	}
+	if (fileIoHooksDArray != NULL) {
+		ExFreePool2(fileIoHooksDArray, 'PMDI', NULL, NULL);
+	}
+	// Return an error
+	return STATUS_INSUFFICIENT_RESOURCES;
 }

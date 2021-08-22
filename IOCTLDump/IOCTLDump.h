@@ -11,10 +11,11 @@
 #define TYPE_DEVICEIOR 5
 #define TYPE_DEVICEIOW 6
 #define TYPE_FILEIOD 7
-
+#define FUZZ_COUNT 200
 #define NT_DEVICE_NAME      L"\\Device\\dIoctl"
 #define DOS_DEVICE_NAME     L"\\DosDevices\\dIoctl"
 #define USR_DEVICE_NAME		L"\\\\.\\dIoctl"
+#define METHOD_FROM_CTL_CODE(ctrlCode)        ((ULONG)(ctrlCode & 3))
 
 
 
@@ -22,6 +23,8 @@ struct HookRequest
 {
 	UNICODE_STRING driverName;
 	short mode;
+	bool fuzz;
 	short type;
 	PVOID* address;
 };
+
