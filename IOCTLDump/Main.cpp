@@ -47,6 +47,7 @@ void RaiseAndCheckIRQL(KIRQL old)
 }
 
 
+
 /// <summary>
 /// File creation helper, creates a file on disk and returns the handle in `fileHandle`
 /// </summary>
@@ -101,6 +102,9 @@ NTSTATUS CreateFolder(LPWSTR folderPath)
 	status = ZwCreateFile(&hFolder, GENERIC_ALL, &objAttr, &statBlock, NULL, FILE_ATTRIBUTE_NORMAL | SYNCHRONIZE, FILE_SHARE_READ, FILE_OPEN_IF, FILE_DIRECTORY_FILE, NULL, 0);
 	RtlFreeUnicodeString(&fPath);
 	ZwClose(hFolder);
+	if (status != STATUS_SUCCESS) {
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "ERROR: Failed to create folder:%ws.\n", folderPath));
+	}
 	return status;
 }
 
@@ -194,7 +198,12 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -212,7 +221,14 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -220,6 +236,8 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 
 	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED,  sizeof(UNICODE_STRING), 'PMDI');
@@ -369,7 +387,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	pOutputBufLenStringUni = NULL;
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -552,7 +570,12 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -570,7 +593,14 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -578,6 +608,8 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 	LPWSTR hookTypeStr = L"\\fastIOW";
 	// Concat ioctl string to full path
@@ -685,7 +717,7 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -871,7 +903,12 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -889,7 +926,14 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -897,6 +941,8 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 	LPWSTR hookTypeStr = L"\\fastIOR";
 	// Concat ioctl string to full path
@@ -995,7 +1041,7 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -1184,7 +1230,12 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -1202,7 +1253,14 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1210,6 +1268,8 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 	LPWSTR hookTypeStr = L"\\devIOW";
 	// Concat ioctl string to full path
@@ -1317,7 +1377,7 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -1488,7 +1548,12 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -1506,7 +1571,14 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1514,6 +1586,8 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 	LPWSTR hookTypeStr = L"\\devIOR";
 	// Concat ioctl string to full path
@@ -1612,7 +1686,7 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -1797,7 +1871,12 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -1815,7 +1894,14 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -1823,6 +1909,8 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
 
 
 	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(UNICODE_STRING), 'PMDI');
@@ -1839,7 +1927,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	{
 		goto cleanup;
 	}
-	LPWSTR hookTypeStr = L"\\fastIOD";
+	LPWSTR hookTypeStr = L"\\devIOD";
 	// Concat ioctl string to full path
 	wcsncat(pFullPath, hookTypeStr, wcslen(hookTypeStr));
 	status = CreateFolder(pFullPath);
@@ -2009,7 +2097,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	pOutputBufLenStringUni = NULL;
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
@@ -2183,7 +2271,12 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 
 	// Base folder for our driver hooks
-	LPWSTR pCFolder = L"C:\\DriverHooks";
+	LPWSTR pCFolder = L"\\DosDevices\\C:\\DriverHooks";
+
+	// Quick workaround instead of properly parsing slashes and creating the nested
+	// folder structure. Ideally in CreateFolder we would check for the existence of each folder
+	// in the path and create them if required
+	LPWSTR pCFolder_tmp2 = L"\\DosDevices\\C:\\DriverHooks\\Driver";
 
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
@@ -2201,7 +2294,14 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		goto cleanup;
 	}
 
-	wcsncat(pFullPath, L"\\", wcslen(L"\\"));
+	status = CreateFolder(pCFolder_tmp2);
+	if (!NT_SUCCESS(status))
+	{
+		goto cleanup;
+	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder2.\n"));
+
+	
 	wcsncat(pFullPath, drvName.Buffer, drvName.Length / sizeof(WCHAR));
 	status = CreateFolder(pFullPath);
 	if (!NT_SUCCESS(status))
@@ -2209,6 +2309,9 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		goto cleanup;
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
+
+	
+
 
 
 	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
@@ -2266,7 +2369,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -2377,7 +2480,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	if (pOutputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 60, 'PMDI);
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 60, 'PMDI');
 	if (pOutputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -2395,7 +2498,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	pOutputBufLenStringUni = NULL;
 
 	IO_STATUS_BLOCK statBlock;
-	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString), NULL, NULL);
+	status = ZwWriteFile(hConfFile, NULL, NULL, NULL, &statBlock, confFileString, wcslen(confFileString) * sizeof(WCHAR), NULL, NULL);
 	ZwClose(hConfFile);
 	hConfFile = NULL;
 	goto cleanup;
