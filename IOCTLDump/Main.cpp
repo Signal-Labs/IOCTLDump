@@ -199,7 +199,7 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -222,11 +222,11 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
 
-	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED,  sizeof(UNICODE_STRING), 'PMDI');
 	if (pIoctlStringUni == NULL) {
 		goto cleanup;
 	}
-	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pIoctlStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -255,11 +255,11 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 	
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -347,11 +347,11 @@ bool FastIoHookD(IN struct _FILE_OBJECT* FileObject,
 	LPWSTR outputLenHeader = L"OutputBufferLength:";
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pOutputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  60, 'PMDI');
 	if (pOutputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -557,7 +557,7 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -596,11 +596,11 @@ bool FastIoHookW(IN struct _FILE_OBJECT* FileObject,
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -876,7 +876,7 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -915,11 +915,11 @@ bool FastIoHookR(IN struct _FILE_OBJECT* FileObject,
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING),'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -1189,7 +1189,7 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -1228,11 +1228,11 @@ NTSTATUS DeviceIoHookW(_DEVICE_OBJECT* DeviceObject,
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -1493,7 +1493,7 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -1532,11 +1532,11 @@ NTSTATUS DeviceIoHookR(_DEVICE_OBJECT* DeviceObject,
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED,  sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -1802,7 +1802,7 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -1825,11 +1825,11 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
 
-	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(UNICODE_STRING), 'PMDI');
 	if (pIoctlStringUni == NULL) {
 		goto cleanup;
 	}
-	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pIoctlStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -1876,11 +1876,11 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -1987,11 +1987,11 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	LPWSTR outputLenHeader = L"OutputBufferLength:";
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pOutputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  60, 'PMDI');
 	if (pOutputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -2188,7 +2188,7 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	SIZE_T fullPathSz = 2048 * sizeof(WCHAR);
 
 	// Used to hold the eventual full path of our data dump, with a max of 2048 characters
-	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', fullPathSz);
+	pFullPath = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  fullPathSz, 'PMDI');
 	if (pFullPath == NULL) {
 		goto cleanup;
 	}
@@ -2211,11 +2211,11 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created initial folder.\n"));
 
 
-	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pIoctlStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pIoctlStringUni == NULL) {
 		goto cleanup;
 	}
-	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pIoctlStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI');
 	if (pIoctlStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -2262,11 +2262,11 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	}
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "INFO: Created folder 2.\n"));
 
-	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pInputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pInputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 30);
+	pInputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED,  30, 'PMDI);
 	if (pInputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -2373,11 +2373,11 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	LPWSTR outputLenHeader = L"OutputBufferLength:";
 	wcsncat(confFileString, outputLenHeader, wcslen(outputLenHeader));
 
-	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', sizeof(UNICODE_STRING));
+	pOutputBufLenStringUni = (PUNICODE_STRING)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(UNICODE_STRING), 'PMDI');
 	if (pOutputBufLenStringUni == NULL) {
 		goto cleanup;
 	}
-	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 'PMDI', 60);
+	pOutputBufLenStringUni->Buffer = (LPWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 60, 'PMDI);
 	if (pOutputBufLenStringUni->Buffer == NULL) {
 		goto cleanup;
 	}
@@ -3262,6 +3262,7 @@ ioctlCleanup(
 	return STATUS_SUCCESS;
 }
 
+DRIVER_INITIALIZE DriverEntry;
 
 /// <summary>
 /// Entry point for the Driver, will initialize the device for user->driver comms.
@@ -3286,7 +3287,7 @@ NTSTATUS DriverEntry(
 	NTSTATUS status;
 	PDEVICE_OBJECT deviceObject;
 	UNICODE_STRING ntUnicodeString;
-
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "Info: In DriverEntry\n"));
 	// Initialize the global structs used for saving hook metadata
 	// Allow at most 20 hooks per hook-type, configure this number as-per your requirements
 	ULONGLONG entry_max_len = 20;
@@ -3371,7 +3372,7 @@ NTSTATUS DriverEntry(
 	}
 
 	PFAST_MUTEX deviceIoHooksWMutex = (PFAST_MUTEX)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FAST_MUTEX), 'PMDI');
-	if (deviceIoHooksWArray == NULL) {
+	if (deviceIoHooksWMutex == NULL) {
 		ExFreePool2(fastIoHooksDMutex, 'PMDI', NULL, NULL);
 		ExFreePool2(fastIoHooksRMutex, 'PMDI', NULL, NULL);
 		ExFreePool2(fastIoHooksWMutex, 'PMDI', NULL, NULL);
@@ -3454,6 +3455,7 @@ NTSTATUS DriverEntry(
 	drvObj->DriverUnload = UnloadDriver;
 	// Initialization is completed, we can return success and expect calls to our create/close and IOCTL handler
 	// after this point.
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "Info: Finished DriverEntry\n"));
 	return STATUS_SUCCESS;
 
 failed_allocation:
@@ -3480,6 +3482,7 @@ failed_allocation:
 	if (fileIoHooksDArray != NULL) {
 		ExFreePool2(fileIoHooksDArray, 'PMDI', NULL, NULL);
 	}
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "ERROR: Failed DriverEntry\n"));
 	// Return an error
 	return STATUS_INSUFFICIENT_RESOURCES;
 }
