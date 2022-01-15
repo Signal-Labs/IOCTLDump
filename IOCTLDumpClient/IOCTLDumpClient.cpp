@@ -26,6 +26,7 @@ int main(int argc, char* argv[])
 	RtlInitUnicodeString pRtlInitUnicodeString = (RtlInitUnicodeString)GetProcAddress(GetModuleHandleA("ntdll"), "RtlInitUnicodeString");
 	pRtlInitUnicodeString(&devNameU, devNameW);
 	printf("Sending request for driver:%wZ\n",devNameU);
+	// E.g. \Device\Spaceport
 	hookRequest.driverName = devNameU;
 	hookRequest.address = NULL;
 	hookRequest.mode = MODE_AUTO;
@@ -57,6 +58,7 @@ int main(int argc, char* argv[])
 	{
 		std::cout << "DeviceIoControl failed, error:" << std::hex << GetLastError();
 		std::cout << "\n";
+		std::cout << "Usage: <exe> \\Device\\<DevName>, e.g.: IOCTLDumpClient.exe \\Device\\MyDevice\n";
 		return 2;
 	}
 	else {

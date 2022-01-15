@@ -32,5 +32,8 @@
     <ClInclude Include="IOCTLDump.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="IOCTLDump_Kern.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

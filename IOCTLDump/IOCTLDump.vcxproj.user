@@ -3,5 +3,9 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <DbgengKernelMachineName>1903test</DbgengKernelMachineName>
+    <TestCertificate>CN="WDKTestCert Christopher,132740934503899814" | D6BB68ED23AC7DDB7CF4A85673B8744A4E570DBB</TestCertificate>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TestCertificate>CN="WDKTestCert Christopher,132741537496104807" | F7323CC138F86DE6FA48147894FE6983C277003F</TestCertificate>
   </PropertyGroup>
 </Project>

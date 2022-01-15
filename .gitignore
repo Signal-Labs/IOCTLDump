@@ -33,4 +33,8 @@
 
 **/x64/**
 
+**/IOCTLDumpClient/x64/**
+
+**/IOCTLDump/x64/**
+
 **/.vs/**

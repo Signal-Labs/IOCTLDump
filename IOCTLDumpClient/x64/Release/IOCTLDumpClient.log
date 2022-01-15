@@ -1,7 +1,0 @@
-﻿  IOCTLDumpClient.cpp
-C:\Users\devl\source\repos\IOCTLDump\IOCTLDumpClient\IOCTLDumpClient.cpp(20,27): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
-  Generating code
-  Previous IPDB not found, fall back to full compilation.
-  All 14 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
-  Finished generating code
-  IOCTLDumpClient.vcxproj -> C:\Users\devl\source\repos\IOCTLDump\x64\Release\IOCTLDumpClient.exe
