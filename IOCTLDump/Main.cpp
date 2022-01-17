@@ -2856,7 +2856,7 @@ NTSTATUS AddDeviceIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	newHook.hookedAddress = originalFunc;
 
 	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
-	IoHookList* hookList = deviceIoHooksDArray;
+	IoHookList* hookList = deviceIoHooksRArray;
 
 	// Obtain lock to our IoHookList to prevent concurrency issues
 	ExAcquireFastMutex(hookList->lock);
@@ -2916,7 +2916,7 @@ NTSTATUS AddDeviceIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	newHook.hookedAddress = originalFunc;
 
 	// Use the `hookList` var for the rest of this function instead of the global, to mitigate typos
-	IoHookList* hookList = deviceIoHooksDArray;
+	IoHookList* hookList = deviceIoHooksWArray;
 
 	// Obtain lock to our IoHookList to prevent concurrency issues
 	ExAcquireFastMutex(hookList->lock);
