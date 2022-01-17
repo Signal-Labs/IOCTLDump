@@ -2643,9 +2643,8 @@ NTSTATUS AddFastIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+	
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -2703,9 +2702,8 @@ NTSTATUS AddFastIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -2764,9 +2762,8 @@ NTSTATUS AddFastIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -2824,9 +2821,8 @@ NTSTATUS AddDeviceIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -2884,9 +2880,8 @@ NTSTATUS AddDeviceIOHookR(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -2944,9 +2939,8 @@ NTSTATUS AddDeviceIOHookW(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRIN
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
@@ -3004,9 +2998,8 @@ NTSTATUS AddFileIOHookD(PVOID* originalFunc, PVOID hookDumpFunc, UNICODE_STRING 
 	hookList->entries[hookList->entry_count] = newHook;
 	// Increment entry_count to the next free index
 	hookList->entry_count += 1;
-	// Overwrite the address of the target function with our hook, note that this is unsafe in a multi-thread/core environment, or even single-core environments where interrupts are enabled.
-	// Ideally we should take precautions like raising our IRQL, that's a TODO
-	*originalFunc = hookDumpFunc;
+
+	InterlockedExchangePointer(originalFunc, hookDumpFunc);;
 
 	// release hook
 	ExReleaseFastMutex(hookList->lock);
