@@ -3225,7 +3225,7 @@ UnloadDriver(
 		ExAcquireFastMutex(fastIoHooksDArray->lock);
 		for (int i = 0; i < fastIoHooksDArray->entry_count; i++)
 		{
-			fastIoHooksDArray->entries[i].hookedAddress = fastIoHooksDArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)fastIoHooksDArray->entries[i].hookedAddress,fastIoHooksDArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(fastIoHooksDArray->lock);
 		ExFreePool2(fastIoHooksDArray->lock, 'PMDI', NULL, NULL);
@@ -3240,7 +3240,7 @@ UnloadDriver(
 		ExAcquireFastMutex(fastIoHooksWArray->lock);
 		for (int i = 0; i < fastIoHooksWArray->entry_count; i++)
 		{
-			fastIoHooksWArray->entries[i].hookedAddress = fastIoHooksWArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)fastIoHooksWArray->entries[i].hookedAddress,fastIoHooksWArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(fastIoHooksWArray->lock);
 		ExFreePool2(fastIoHooksWArray->lock, 'PMDI', NULL, NULL);
@@ -3254,7 +3254,7 @@ UnloadDriver(
 		ExAcquireFastMutex(fastIoHooksRArray->lock);
 		for (int i = 0; i < fastIoHooksRArray->entry_count; i++)
 		{
-			fastIoHooksRArray->entries[i].hookedAddress = fastIoHooksRArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)fastIoHooksRArray->entries[i].hookedAddress, fastIoHooksRArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(fastIoHooksRArray->lock);
 		ExFreePool2(fastIoHooksRArray->lock, 'PMDI', NULL, NULL);
@@ -3267,7 +3267,7 @@ UnloadDriver(
 		ExAcquireFastMutex(deviceIoHooksRArray->lock);
 		for (int i = 0; i < deviceIoHooksRArray->entry_count; i++)
 		{
-			deviceIoHooksRArray->entries[i].hookedAddress = deviceIoHooksRArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)deviceIoHooksRArray->entries[i].hookedAddress, deviceIoHooksRArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(deviceIoHooksRArray->lock);
 		ExFreePool2(deviceIoHooksRArray->lock, 'PMDI', NULL, NULL);
@@ -3280,7 +3280,7 @@ UnloadDriver(
 		ExAcquireFastMutex(deviceIoHooksWArray->lock);
 		for (int i = 0; i < deviceIoHooksWArray->entry_count; i++)
 		{
-			deviceIoHooksWArray->entries[i].hookedAddress = deviceIoHooksWArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)deviceIoHooksWArray->entries[i].hookedAddress, deviceIoHooksWArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(deviceIoHooksWArray->lock);
 		ExFreePool2(deviceIoHooksWArray->lock, 'PMDI', NULL, NULL);
@@ -3293,7 +3293,7 @@ UnloadDriver(
 		ExAcquireFastMutex(deviceIoHooksDArray->lock);
 		for (int i = 0; i < deviceIoHooksDArray->entry_count; i++)
 		{
-			deviceIoHooksDArray->entries[i].hookedAddress = deviceIoHooksDArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)deviceIoHooksDArray->entries[i].hookedAddress,deviceIoHooksDArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(deviceIoHooksDArray->lock);
 		ExFreePool2(deviceIoHooksDArray->lock, 'PMDI', NULL, NULL);
@@ -3306,7 +3306,7 @@ UnloadDriver(
 		ExAcquireFastMutex(fileIoHooksDArray->lock);
 		for (int i = 0; i < fileIoHooksDArray->entry_count; i++)
 		{
-			fileIoHooksDArray->entries[i].hookedAddress = fileIoHooksDArray->entries[i].originalFunction;
+			InterlockedExchangePointer((volatile PVOID*)fileIoHooksDArray->entries[i].hookedAddress, fileIoHooksDArray->entries[i].originalFunction);
 		}
 		ExReleaseFastMutex(fileIoHooksDArray->lock);
 		ExFreePool2(fileIoHooksDArray->lock, 'PMDI', NULL, NULL);
