@@ -5,12 +5,23 @@
 #include "IOCTLDump.h"
 #include "IOCTLDump_Kern.h"
 
+
+
 #define METHOD_FROM_CTL_CODE(ctrlCode)         ((ULONG)(ctrlCode & 3))
 
 #define METHOD_BUFFERED                 0
 #define METHOD_IN_DIRECT                1
 #define METHOD_OUT_DIRECT               2
 #define METHOD_NEITHER                  3
+
+
+
+// For Windows 10 support, we redirect ExFreePool2 calls to ExFreePool
+#ifdef W10
+void ExFreePool2(PVOID pointer, ULONG tag, PVOID arg3, ULONG arg4) {
+	return ExFreePool(pointer);
+}
+#endif
 
 
 IoHookList* fastIoHooksDArray = NULL;
@@ -26,6 +37,8 @@ IoHookList* deviceIoHooksWArray = NULL;
 IoHookList* deviceIoHooksRArray = NULL;
 
 IoHookList* fileIoHooksDArray = NULL;
+
+
 
 
 KIRQL LowerAndCheckIRQL()
