@@ -5,8 +5,6 @@
 #include "IOCTLDump.h"
 #include "IOCTLDump_Kern.h"
 
-
-
 #define METHOD_FROM_CTL_CODE(ctrlCode)         ((ULONG)(ctrlCode & 3))
 
 #define METHOD_BUFFERED                 0
@@ -1958,9 +1956,9 @@ NTSTATUS DeviceIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	case METHOD_BUFFERED:
 		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->AssociatedIrp.SystemBuffer; break;
 	case METHOD_IN_DIRECT:
-		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = MmGetMdlVirtualAddress(Irp->MdlAddress); break;
 	case METHOD_OUT_DIRECT:
-		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = MmGetMdlVirtualAddress (Irp->MdlAddress); break;
 	case METHOD_NEITHER:
 		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
 	default:
@@ -2359,9 +2357,9 @@ NTSTATUS FileIoHookD(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	case METHOD_BUFFERED:
 		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->AssociatedIrp.SystemBuffer; break;
 	case METHOD_IN_DIRECT:
-		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = MmGetMdlVirtualAddress(Irp->MdlAddress); break;
 	case METHOD_OUT_DIRECT:
-		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = Irp->MdlAddress; break;
+		inBuf = Irp->AssociatedIrp.SystemBuffer; outBuf = MmGetMdlVirtualAddress(Irp->MdlAddress); break;
 	case METHOD_NEITHER:
 		inBuf = pIoStackLocation->Parameters.DeviceIoControl.Type3InputBuffer; outBuf = Irp->UserBuffer; break;
 	default:
