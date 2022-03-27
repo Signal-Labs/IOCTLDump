@@ -19,3 +19,10 @@ Then, use IOCTLDumpClient.exe to interact with the driver to hook another driver
 ` IOCTLDumpClient.exe \Device\SomeDeviceToHook `
 
 Then, intercepted IOCTLs will be dumped as per the design.txt file in C:\DriverHooks
+
+
+## Notes
+
+By default this driver targets Windows 11.
+
+To target Windows 10, ensure you have 'W10' defined in your visual studio preprocessor definitions.
