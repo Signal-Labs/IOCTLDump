@@ -1,0 +1,18 @@
+[package]
+name = "ioctl_replayer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Christopher Vella (@kharosx0) <cvella@signal-labs.com>"]
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[dependencies.windows]
+version = "0.48"
+features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+]
